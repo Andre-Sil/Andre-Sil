@@ -9,6 +9,7 @@ on:
 jobs:
   run-notebook:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Checkout do repositório
         uses: actions/checkout@v4
@@ -16,7 +17,7 @@ jobs:
       - name: Configurar Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.12'
 
       - name: Instalar dependências
         run: |
@@ -27,6 +28,6 @@ jobs:
         env:
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
         run: |
-          papermill "seu_notebook.ipynb" "output.ipynb" \
+          papermill "sistema_b3_completo.ipynb" "output.ipynb" \
             -p EMAIL_REMETENTE "ab11.94958191@gmail.com" \
             -p SENHA_APP "$GMAIL_APP_PASSWORD"
