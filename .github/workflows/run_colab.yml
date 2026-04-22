@@ -14,6 +14,11 @@ jobs:
       - name: Checkout do repositório
         uses: actions/checkout@v4
 
+      - name: Verificar arquivos no repositório (debug)
+        run: |
+          echo "=== Arquivos .ipynb encontrados ==="
+          find . -name "*.ipynb"
+
       - name: Configurar Python
         uses: actions/setup-python@v5
         with:
