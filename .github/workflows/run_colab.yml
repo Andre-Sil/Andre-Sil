@@ -28,6 +28,6 @@ jobs:
         env:
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
         run: |
-          papermill "sistema_b3_completo.ipynb" "output.ipynb" \
+          papermill "b3.ipynb" "output.ipynb" \
             -p EMAIL_REMETENTE "ab11.94958191@gmail.com" \
             -p SENHA_APP "$GMAIL_APP_PASSWORD"
