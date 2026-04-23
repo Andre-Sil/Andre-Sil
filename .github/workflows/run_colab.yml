@@ -2,9 +2,8 @@ name: Executar Sistema B3 Diariamente
 
 on:
   schedule:
-    # Executa todo dia útil às 22:00 UTC (19:00 horário de Brasília)
     - cron: '0 22 * * 1-5'
-  workflow_dispatch:  # permite execução manual
+  workflow_dispatch:
 
 jobs:
   run-notebook:
@@ -14,10 +13,16 @@ jobs:
       - name: Checkout do repositório
         uses: actions/checkout@v4
 
-      - name: Verificar arquivos no repositório (debug)
+      - name: 🔍 Verificar arquivos no repositório (DEBUG)
         run: |
-          echo "=== Arquivos .ipynb encontrados ==="
+          echo "=== Raiz do repositório ==="
+          ls -la
+          echo ""
+          echo "=== Procurando por arquivos .ipynb ==="
           find . -name "*.ipynb"
+          echo ""
+          echo "=== Procurando por qualquer arquivo com 'b3' no nome ==="
+          find . -name "*b3*"
 
       - name: Configurar Python
         uses: actions/setup-python@v5
