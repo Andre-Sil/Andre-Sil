@@ -13,31 +13,21 @@ jobs:
       - name: Checkout do repositório
         uses: actions/checkout@v4
 
-      - name: 🔍 Verificar arquivos no repositório (DEBUG)
-        run: |
-          echo "=== Raiz do repositório ==="
-          ls -la
-          echo ""
-          echo "=== Procurando por arquivos .ipynb ==="
-          find . -name "*.ipynb"
-          echo ""
-          echo "=== Procurando por qualquer arquivo com 'b3' no nome ==="
-          find . -name "*b3*"
-
       - name: Configurar Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
-      - name: Instalar dependências
+      - name: Instalar dependências e kernel Jupyter
         run: |
           pip install yfinance pandas-ta optuna feedparser vaderSentiment
-          pip install nbconvert nbformat papermill
+          pip install nbconvert nbformat papermill ipykernel
+          python -m ipykernel install --user --name python3 --display-name "Python 3"
 
       - name: Executar notebook com papermill
         env:
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
         run: |
           papermill "b3.ipynb" "output.ipynb" \
-            -p EMAIL_REMETENTE "ab11.94958191@gmail.com" \
-            -p SENHA_APP "$GMAIL_APP_PASSWORD"
+            -p SENHA_APP "$GMAIL_APP_PASSWORD" \
+            --kernel python3
