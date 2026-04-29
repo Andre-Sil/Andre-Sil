@@ -2,7 +2,7 @@ name: Executar Sistema B3 Diariamente
 
 on:
   schedule:
-    - cron: '0 22 * * 1-5'
+    - cron: '0 22 * * 1-5'  # Executa 22h (19h horário Brasília) dias úteis
   workflow_dispatch:
 
 jobs:
@@ -26,8 +26,7 @@ jobs:
 
       - name: Executar notebook com papermill
         env:
+          TRADING_EMAIL: ${{ secrets.TRADING_EMAIL }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
         run: |
-          papermill "b3.ipynb" "output.ipynb" \
-            -p SENHA_APP "$GMAIL_APP_PASSWORD" \
-            --kernel python3
+          papermill "b3.ipynb" "output.ipynb" --kernel python3
