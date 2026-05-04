@@ -8,7 +8,8 @@ on:
 jobs:
   run-notebook:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60  # ← Aumentado para dar margem de segurança
+
     steps:
       - name: Checkout do repositório
         uses: actions/checkout@v4
@@ -17,11 +18,13 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          cache: 'pip'  # ← Ativa o cache automático do pip
 
-      - name: Instalar dependências e kernel Jupyter
+      - name: Instalar dependências com timeout e retry
         run: |
-          pip install yfinance pandas-ta optuna feedparser vaderSentiment
-          pip install nbconvert nbformat papermill ipykernel
+          python -m pip install --upgrade pip
+          pip install --default-timeout=300 --retries 5 yfinance pandas-ta optuna feedparser vaderSentiment
+          pip install --default-timeout=300 --retries 5 nbconvert nbformat papermill ipykernel
           python -m ipykernel install --user --name python3 --display-name "Python 3"
 
       - name: Executar notebook com papermill
@@ -29,10 +32,10 @@ jobs:
           TRADING_EMAIL: ${{ secrets.TRADING_EMAIL }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           BRAPI_API_TOKEN: ${{ secrets.BRAPI_API_TOKEN }}
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}          # opcional
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}     # opcional
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          papermill "b3.ipynb" "output.ipynb" --kernel python3
+          papermill "b3.ipynb" "output.ipynb" --kernel python3 --log-level INFO
 
       - name: Upload de artefatos (relatório e log)
         if: always()
@@ -42,5 +45,5 @@ jobs:
           path: |
             relatorio_detalhado.txt
             resultado_analise.json
-            execution_detalhada_v85.log
+            execucao_detalhada_v85.log
             trading_log_v85.json
