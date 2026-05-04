@@ -2,7 +2,7 @@ name: Executar Sistema B3 Diariamente
 
 on:
   schedule:
-    - cron: '0 22 * * 1-5'  # Executa 22h (19h horário Brasília) dias úteis
+    - cron: '0 22 * * 1-5'
   workflow_dispatch:
 
 jobs:
@@ -28,5 +28,19 @@ jobs:
         env:
           TRADING_EMAIL: ${{ secrets.TRADING_EMAIL }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          BRAPI_API_TOKEN: ${{ secrets.BRAPI_API_TOKEN }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}          # opcional
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}     # opcional
         run: |
           papermill "b3.ipynb" "output.ipynb" --kernel python3
+
+      - name: Upload de artefatos (relatório e log)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: resultados-gebra
+          path: |
+            relatorio_detalhado.txt
+            resultado_analise.json
+            execution_detalhada_v85.log
+            trading_log_v85.json
