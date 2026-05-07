@@ -1,9 +1,9 @@
-name: Executar Sistema B3 Diariamente
+name: Executar Sistema GEBRA B3 (v15)
 
 on:
   schedule:
-    - cron: '0 22 * * 1-5'
-  workflow_dispatch:
+    - cron: '0 22 * * 1-5'   # Segunda a sexta, 22h UTC (19h BRT)
+  workflow_dispatch:          # Permite execução manual
 
 jobs:
   run-notebook:
@@ -14,7 +14,7 @@ jobs:
       - name: Checkout do repositório
         uses: actions/checkout@v4
 
-      - name: Configurar Python
+      - name: Configurar Python 3.12
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -26,7 +26,7 @@ jobs:
           pip install --default-timeout=300 --retries 5 nbconvert nbformat papermill ipykernel
           python -m ipykernel install --user --name python3 --display-name "Python 3"
 
-      - name: Executar notebook com papermill
+      - name: Executar notebook GEBRA v15.1
         env:
           TRADING_EMAIL: ${{ secrets.TRADING_EMAIL }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
@@ -36,13 +36,13 @@ jobs:
         run: |
           papermill "b3.ipynb" "output.ipynb" --kernel python3 --log-level INFO
 
-      - name: Upload de artefatos (relatório e log)
+      - name: Upload de artefatos (relatório detalhado e logs)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: resultados-gebra
+          name: resultados-gebra-v15
           path: |
-            relatorio_detalhado.txt
-            resultado_analise.json
-            execucao_detalhada_v85.log
-            trading_log_v85.json
+            relatorio_gebra_v15.txt
+            log_gebra_v15.json
+            execucao_detalhada_v15.log
+            trading_log_v15.json
