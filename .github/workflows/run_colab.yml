@@ -1,4 +1,4 @@
-name: Executar Sistema GEBRA B3 (v15)
+name: Executar Sistema GEBRA B3 (v16.1)
 
 on:
   schedule:
@@ -26,7 +26,7 @@ jobs:
           pip install --default-timeout=300 --retries 5 nbconvert nbformat papermill ipykernel
           python -m ipykernel install --user --name python3 --display-name "Python 3"
 
-      - name: Executar notebook GEBRA v15.1
+      - name: Executar notebook GEBRA v16.1
         env:
           TRADING_EMAIL: ${{ secrets.TRADING_EMAIL }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
@@ -40,9 +40,9 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: resultados-gebra-v15
+          name: resultados-gebra-v16_1
           path: |
-            relatorio_gebra_v15.txt
-            log_gebra_v15.json
-            execucao_detalhada_v15.log
-            trading_log_v15.json
+            relatorio_gebra_v16_1.txt
+            log_gebra_v16_1.json
+            execucao_detalhada_v16_1.log
+            trading_log_v16_1.json
