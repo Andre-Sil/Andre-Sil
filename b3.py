@@ -1,0 +1,2506 @@
+#!/usr/bin/env python3
+# ==================== INSTALAÇÃO E IMPORTAÇÕES ====================
+import os
+import yfinance as yf
+import pandas as pd
+import numpy as np
+import pandas_ta as ta
+import requests
+from bs4 import BeautifulSoup
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from datetime import datetime, timedelta
+import time, warnings, json, sys, traceback, gc, socket, pickle
+from collections import Counter
+from brapi import Brapi
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+try:
+    from scipy.signal import argrelextrema
+    SCIPY_AVAILABLE = True
+except ImportError:
+    SCIPY_AVAILABLE = False
+    print("⚠️ scipy não disponível. Usando detecção manual de pivôs.")
+
+print("✅ Bibliotecas carregadas")
+
+# ==================== CONFIGURAÇÕES DE ACESSO ====================
+EMAIL_REMETENTE = os.getenv('TRADING_EMAIL', '')
+SENHA_APP = os.getenv('GMAIL_APP_PASSWORD', '')
+BRAPI_TOKEN = os.getenv('BRAPI_API_TOKEN', '') or os.getenv('BRAPI_TOKEN', '')
+TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN', '')
+TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID', '')
+
+# ==================== PARÂMETROS GLOBAIS ====================
+CAPITAL_TOTAL = 100000.0
+RISCO_PERCENTUAL_MINIMO = 0.02
+RISCO_PERCENTUAL_MAXIMO = 0.10
+PRECO_MINIMO = 2.00
+MAX_SETUPS_POR_DIA = 20
+MAX_ATIVOS_POR_SETOR = 2
+PAYOFF_MINIMO = 3.0
+Z_VOLUME_COMPRA   = 1.0
+Z_VOLUME_VENDA    = 0.5
+Z_GAP_FUGA        = 1.5
+Z_GAP_EXAUSTAO    = 2.5
+MAX_TOQUES_NIVEL = 4
+TOLERANCIA_NIVEL = 0.04
+TOLERANCIA_OMBRO = 0.08
+CORPO_MINIMO_CANDLE = 0.50
+FECHAMENTO_EXTREMIDADE = 0.25
+VOLUME_MULT_ALTO = 2.0
+VOLUME_MULT_MEDIO_COMPRA = 1.2
+VOLUME_MULT_VENDA = 0.5
+ATR_PERIODOS = 14
+VOLUME_FORMACAO_MAX_MEDIA = 0.5
+CUP_TOPO_CORRECAO_MAX = 0.50
+CUP_HANDLE_MAX_DIAS = 14
+PIVO_ORDEM = 3
+PONTUACAO_MINIMA_CONFLUENCIA = 60
+MIN_SINAIS_CONFLUENCIA = 3
+IFR_MAX_COMPRA = 70
+IFR_MIN_COMPRA = 25
+IFR_MAX_VENDA = 75
+IFR_MIN_VENDA = 30
+VOLUME_MINIMO_ACAO = 1_000_000
+VOLUME_FINANCEIRO_MINIMO = 1_000_000
+ADX_MINIMO = 25
+CACHE_TICKERS_FILE = "cache_tickers_b3.json"
+FALLBACK_TICKERS = ['PETR4','VALE3','ITUB4','BBDC4','BBAS3','ABEV3','WEGE3','RADL3','SUZB3','GGBR4','MGLU3','VVAR3','RENT3','RAIL3','CCRO3','ELET3','CPFE3','SBSP3','SANB11','B3SA3','JBSS3','BRFS3','KLBN11','EQTL3']
+TICKERS_BLOQUEADOS = ['GFSA3.SA','ONCO3.SA','PMAM3.SA','AZTE3.SA','RAIZ4.SA','BHIA3.SA','CASH3.SA','LJQQ3.SA','RCSL4.SA','HBOR3.SA']
+ANALISAR_DIARIO = True
+ANALISAR_SEMANAL = True
+ANALISAR_MENSAL = True
+MODO_TESTE = False
+TESTE_TICKERS = ['PETR4','VALE3','ITUB4','BBDC4','BBAS3','ABEV3','WEGE3','RADL3','GGBR4','MGLU3']
+ARQUIVO_LOG = "trading_log_v16_3.json"
+ARQUIVO_LOG_DETALHADO = "execucao_detalhada_v16_3.log"
+
+# --- NOVOS PARÂMETROS FUNDAMENTALISTAS E MACRO ---
+USAR_FILTRO_FUNDAMENTAL = True
+USAR_SCORE_SETORIAL = True
+ROE_MINIMO = 0.15
+DIVIDA_EBITDA_MAX = 2.5
+FCF_POSITIVO = True
+P_L_MAXIMO = 25.0
+
+# --- Feature flags originais ---
+MODO_PULLBACK = True
+USAR_OBV = True
+USAR_DIVERGENCIAS = True
+USAR_GAPS = True
+USAR_BOLLINGER = True
+USAR_MACD_CONFLUENCIA = True
+USAR_FILTRO_MACRO_LTB = True
+USAR_ESTRUTURA_FUNDO = True
+USAR_CUNHAS = True
+USAR_ALARGAMENTOS = True
+USAR_TOPO_FUNDO_ARREDONDADO = True
+USAR_SOLDADOS_CORVOS = True
+USAR_NUVEM_NEGRA = True
+USAR_HARAMI = True
+USAR_CLIMAX = True
+USAR_EXTENSAO_PRECO = True
+USAR_SENSIBILIDADE_CANAL = True
+USAR_CRUZAMENTO_MEDIAS = True
+
+EXTENSAO_MM20_MAX = 5.0
+EXTENSAO_MM200_MAX = 10.0
+GAP_MIN_ATR_MULT = 0.5
+GAP_VOLUME_MULT = 1.5
+GAP_EXAUSTAO_VOLUME_MULT = 2.0
+BOLLINGER_SQUEEZE_LOOKBACK = 120
+BOLLINGER_SQUEEZE_TOL = 1.1
+PULLBACK_TOLERANCIA_PCT = 0.01
+PULLBACK_VOLUME_MAX_PCT = 0.8
+LTB_JANELA = 120
+
+print("✅ Parâmetros v16.3 carregados – Modo Híbrido ativado")
+
+# ==================== LOGGER E UTILITÁRIOS ====================
+class Logger:
+    def __init__(self, log_json, log_detalhado):
+        self.log_json = log_json
+        self.log_detalhado = log_detalhado
+        self.t0 = time.time()
+        self.tm = {}
+        self.buffer = []
+        self.max_buffer = 100
+
+    def log(self, msg, nivel="INFO", extra=None):
+        ts = datetime.now().strftime("%H:%M:%S")
+        linha = f"[{ts}] [{nivel}] {msg}"
+        if extra:
+            linha += f" | {extra}"
+        print(linha)
+        if self.log_detalhado:
+            self.buffer.append(linha + "\n")
+            if len(self.buffer) >= self.max_buffer:
+                self._flush()
+
+    def _flush(self):
+        if self.log_detalhado and self.buffer:
+            try:
+                with open(self.log_detalhado, 'a', encoding='utf-8') as f:
+                    f.writelines(self.buffer)
+                self.buffer.clear()
+            except Exception as e:
+                print(f"Erro ao gravar log: {e}")
+
+    def warn(self, msg, extra=None):
+        self.log(msg, "WARN", extra)
+
+    def error(self, msg, extra=None):
+        self.log(msg, "ERRO", extra)
+
+    def inicio(self, etapa):
+        self.tm[etapa] = {'ini': time.time()}
+        self.log(f"🚀 INÍCIO: {etapa}", "ETAPA")
+
+    def fim(self, etapa, dados=None):
+        if etapa in self.tm:
+            dur = time.time() - self.tm[etapa]['ini']
+            self.tm[etapa]['dur'] = dur
+            msg = f"✅ FIM: {etapa} ({dur:.1f}s)"
+            if dados:
+                msg += " | " + " | ".join(f"{k}:{v}" for k, v in dados.items())
+            self.log(msg, "ETAPA")
+
+    def resumo(self):
+        self._flush()
+        total = time.time() - self.t0
+        self.log("\n" + "="*60, "RESUMO")
+        self.log(f"⏱️ Tempo total: {total:.1f}s", "RESUMO")
+        for etapa, dados in self.tm.items():
+            if 'dur' in dados:
+                pct = dados['dur']/total*100 if total>0 else 0
+                self.log(f"   • {etapa}: {dados['dur']:.1f}s ({pct:.0f}%)", "RESUMO")
+        self.log("="*60 + "\n", "RESUMO")
+
+logger = Logger(ARQUIVO_LOG, ARQUIVO_LOG_DETALHADO)
+
+def _log_exc(contexto, e):
+    try:
+        msg = f"[{contexto}] {type(e).__name__}: {str(e)[:200]}"
+        logger.error(msg)
+        with open('traceback_errors.log', 'a', encoding='utf-8') as f:
+            f.write(f"\n{'='*60}\n{datetime.now()}\n{contexto}\n{str(e)}\n{traceback.format_exc()}")
+    except:
+        pass
+
+def enviar_telegram(mensagem, parse_mode='HTML'):
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    try:
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                      data={'chat_id': TELEGRAM_CHAT_ID, 'text': mensagem, 'parse_mode': parse_mode}, timeout=10)
+    except Exception as e:
+        _log_exc('Telegram', e)
+
+def verificar_conectividade():
+    try:
+        socket.create_connection(("8.8.8.8", 53), timeout=5)
+        return True
+    except OSError:
+        return False
+
+print("✅ Logger e utilitários carregados")
+
+# ==================== FUNÇÕES MACRO E SETORIAL ====================
+CACHE_FUNDOS_FILE = "cache_fundamentos.pkl"
+CACHE_MACRO_FILE = "cache_macro.json"
+
+def obter_indicadores_macro():
+    indicadores = {'SELIC': 13.75, 'IPCA': 4.5, 'PIB': 2.5, 'DOLAR': 5.20}
+    try:
+        url_selic = "https://api.bcb.gov.br/dados/serie/bcdata.sgs.1178/dados/ultimos/1?formato=json"
+        resp = requests.get(url_selic, timeout=10)
+        if resp.status_code == 200:
+            dados = resp.json()
+            if dados:
+                indicadores['SELIC'] = float(dados[0]['valor'])
+        url_ipca = "https://api.bcb.gov.br/dados/serie/bcdata.sgs.433/dados/ultimos/1?formato=json"
+        resp = requests.get(url_ipca, timeout=10)
+        if resp.status_code == 200:
+            dados = resp.json()
+            if dados:
+                indicadores['IPCA'] = float(dados[0]['valor'])
+        indicadores['PIB'] = 2.8
+        url_cambio = "https://economia.awesomeapi.com.br/json/last/USD-BRL"
+        resp = requests.get(url_cambio, timeout=10)
+        if resp.status_code == 200:
+            dados = resp.json()
+            indicadores['DOLAR'] = float(dados['USDBRL']['bid'])
+    except Exception as e:
+        logger.warn(f"Erro macro: {e}")
+    return indicadores
+
+def classificar_setor(ticker):
+    ticker_clean = ticker.replace('.SA', '')
+    if ticker_clean.startswith(('PETR', 'PRIO', 'RRRP', 'ENAT', 'RECA')): return 'Petróleo e Gás'
+    if ticker_clean.startswith(('VALE', 'CSNA', 'GGBR', 'CMIN', 'USIM', 'GERA')): return 'Mineração e Siderurgia'
+    if ticker_clean.startswith(('ITUB', 'BBDC', 'BBAS', 'SANB', 'BPAC', 'BRKM', 'ABEV')): return 'Financeiro e Bens de Consumo'
+    if ticker_clean.startswith(('WEGE', 'RADL', 'SUZB', 'KLBN', 'RENT', 'RAIL', 'CCRO', 'ECOR')): return 'Indústria e Logística'
+    if ticker_clean.startswith(('ELET', 'CPFE', 'ENBR', 'CMIG', 'CESP', 'TAEE')): return 'Energia e Saneamento'
+    if ticker_clean.startswith(('MGLU', 'VVAR', 'BHIA', 'AMER')): return 'Varejo'
+    if ticker_clean.startswith(('B3SA', 'XPBR', 'INBR')): return 'Serviços Financeiros'
+    if ticker_clean.startswith(('JBSS', 'BRFS', 'MRFG', 'SMFT')): return 'Agroindústria'
+    if ticker_clean.startswith(('EQTL', 'VIVT', 'TIMS', 'TELB')): return 'Telecomunicações'
+    return 'Diversos'
+
+def calcular_score_setorial(setor, macro):
+    if setor == 'Petróleo e Gás':
+        score = 50 + (macro['DOLAR'] - 5.0) * 10 - (macro['SELIC'] - 10.0) * 2 + (macro['PIB'] - 2.0) * 5
+    elif setor == 'Mineração e Siderurgia':
+        score = 50 + (macro['DOLAR'] - 5.0) * 15 - (macro['SELIC'] - 10.0) * 3 + (macro['PIB'] - 2.0) * 8
+    elif setor == 'Financeiro e Bens de Consumo':
+        score = 50 + (macro['SELIC'] - 10.0) * 2 - (macro['IPCA'] - 4.0) * 5 + (macro['PIB'] - 2.0) * 10
+    elif setor == 'Energia e Saneamento':
+        score = 50 + (macro['IPCA'] - 3.0) * 8 - (macro['SELIC'] - 10.0) * 3
+    elif setor == 'Varejo':
+        score = 50 - (macro['SELIC'] - 10.0) * 5 - (macro['IPCA'] - 4.0) * 8 + (macro['PIB'] - 2.0) * 12
+    elif setor == 'Agroindústria':
+        score = 50 + (macro['DOLAR'] - 5.0) * 12 - (macro['SELIC'] - 10.0) * 2
+    else:
+        score = 50
+    return max(0, min(100, score))
+
+# ==================== CHECKLIST FUNDAMENTAL ====================
+def baixar_fundamentos_yfinance(ticker, timeout=15):
+    try:
+        tkr = yf.Ticker(ticker)
+        info = tkr.info
+        if not info:
+            return None
+        roe = info.get('returnOnEquity', np.nan)
+        debt_to_equity = info.get('debtToEquity', np.nan)
+        free_cashflow = info.get('freeCashflow', np.nan)
+        operating_cashflow = info.get('operatingCashflow', np.nan)
+        capital_exp = info.get('capitalExpenditures', np.nan)
+        pe_ratio = info.get('trailingPE', np.nan)
+        market_cap = info.get('marketCap', np.nan)
+        total_debt = info.get('totalDebt', np.nan)
+        ebitda = info.get('ebitda', np.nan)
+        cash = info.get('totalCash', 0)
+        net_debt = total_debt - cash if total_debt else np.nan
+        debt_ebitda = net_debt / ebitda if ebitda and ebitda > 0 else np.nan
+        if pd.notna(operating_cashflow) and pd.notna(capital_exp):
+            fcf_real = operating_cashflow - capital_exp
+        else:
+            fcf_real = free_cashflow if pd.notna(free_cashflow) else np.nan
+        return {
+            'roe': roe,
+            'debt_ebitda': debt_ebitda,
+            'fcf': fcf_real,
+            'pe': pe_ratio,
+            'market_cap': market_cap
+        }
+    except Exception as e:
+        _log_exc(f'Fundamentos {ticker}', e)
+        return None
+
+def aplicar_checklist_fundamental(fund_data, ticker):
+    if not fund_data:
+        return False, "Sem dados fundamentais", {}
+    roe = fund_data.get('roe', np.nan)
+    debt_ebitda = fund_data.get('debt_ebitda', np.nan)
+    fcf = fund_data.get('fcf', np.nan)
+    pe = fund_data.get('pe', np.nan)
+    metricas = {'ROE': roe, 'Dívida/EBITDA': debt_ebitda, 'FCF': fcf, 'P/L': pe}
+    setor = classificar_setor(ticker)
+    infra = setor in ['Energia e Saneamento', 'Petróleo e Gás', 'Mineração e Siderurgia']
+    if pd.isna(roe) or roe < ROE_MINIMO:
+        return False, f"ROE {roe:.1%} < {ROE_MINIMO:.0%}", metricas
+    if pd.isna(debt_ebitda):
+        return False, "Dívida/EBITDA indisponível", metricas
+    if not infra and debt_ebitda > DIVIDA_EBITDA_MAX:
+        return False, f"Dívida/EBITDA {debt_ebitda:.1f}x > {DIVIDA_EBITDA_MAX:.1f}x", metricas
+    if infra and debt_ebitda > DIVIDA_EBITDA_MAX * 2.5:
+        return False, f"Infra: Dívida/EBITDA {debt_ebitda:.1f}x > {DIVIDA_EBITDA_MAX*2.5:.1f}x", metricas
+    if FCF_POSITIVO and (pd.isna(fcf) or fcf <= 0):
+        return False, f"FCF {fcf:.0f} (não positivo)", metricas
+    if pd.notna(pe) and pe > P_L_MAXIMO and pe > 0:
+        return False, f"P/L {pe:.1f}x > {P_L_MAXIMO:.0f}x", metricas
+    return True, "Checklist aprovado", metricas
+
+# ==================== DOWNLOAD PARALELIZADO ====================
+def download_completo_ticker(ticker, periodo='5y'):
+    try:
+        df = yf.download(ticker, period=periodo, auto_adjust=True, progress=False)
+        if df.empty:
+            return ticker, None, None
+        df = df[['Open','High','Low','Close','Volume']].copy()
+        fund = baixar_fundamentos_yfinance(ticker)
+        return ticker, df, fund
+    except Exception as e:
+        _log_exc(f'Download {ticker}', e)
+        return ticker, None, None
+
+def baixar_dados_paralelo(tickers_sa, periodo='5y', max_workers=8):
+    resultados_precos = {}
+    resultados_fund = {}
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(download_completo_ticker, t, periodo): t for t in tickers_sa}
+        for future in as_completed(futures):
+            ticker, df, fund = future.result()
+            if df is not None:
+                resultados_precos[ticker] = df
+            if fund is not None:
+                resultados_fund[ticker] = fund
+    return resultados_precos, resultados_fund
+
+def carregar_cache_fundamentos():
+    try:
+        with open(CACHE_FUNDOS_FILE, 'rb') as f:
+            return pickle.load(f)
+    except:
+        return {}
+
+def salvar_cache_fundamentos(cache):
+    try:
+        with open(CACHE_FUNDOS_FILE, 'wb') as f:
+            pickle.dump(cache, f)
+    except:
+        pass
+
+def baixar_dados_brapi_otimizado(tickers_sa, periodo_anos=5, interval='1d'):
+    if not BRAPI_TOKEN:
+        client = Brapi()
+    else:
+        client = Brapi(api_key=BRAPI_TOKEN)
+    resultados = {}
+    tickers_limpos = [t.replace('.SA', '') for t in tickers_sa]
+    for i, t in enumerate(tickers_limpos):
+        if i % 50 == 0:
+            logger.log(f"📡 Brapi SDK: {i+1}/{len(tickers_limpos)}...")
+        try:
+            resp = client.quote.retrieve(tickers=t, range=f'{periodo_anos}y', interval=interval)
+            quotes = resp.results if hasattr(resp, 'results') else resp
+            if not isinstance(quotes, list):
+                quotes = [quotes]
+            for q in quotes:
+                tk = q.symbol + '.SA'
+                hist = q.historical_data_price if hasattr(q, 'historical_data_price') else []
+                if hist and len(hist) > 0:
+                    df = pd.DataFrame(hist)
+                    df['date'] = pd.to_datetime(df['date'], unit='s')
+                    df.set_index('date', inplace=True)
+                    df.rename(columns={'open':'Open','high':'High','low':'Low','close':'Close','volume':'Volume'}, inplace=True)
+                    df = df[['Open','High','Low','Close','Volume']]
+                    resultados[tk] = df
+        except Exception as e:
+            _log_exc(f'Brapi {t}', e)
+            time.sleep(0.5)
+        time.sleep(0.3)
+    return resultados
+
+def obter_tickers_brapi():
+    if not BRAPI_TOKEN:
+        return []
+    tickers = []
+    try:
+        url = "https://brapi.dev/api/quote/list"
+        headers = {'Authorization': f'Bearer {BRAPI_TOKEN}'}
+        page = 1
+        while True:
+            params = {'limit': 100, 'page': page, 'type': 'stock'}
+            resp = requests.get(url, headers=headers, params=params, timeout=15)
+            if resp.status_code != 200:
+                break
+            data = resp.json()
+            stocks = data.get('stocks', [])
+            if not stocks:
+                break
+            for s in stocks:
+                tickers.append(s['stock'])
+            page += 1
+            time.sleep(0.2)
+    except Exception as e:
+        logger.warn(f"Erro brapi list: {e}")
+    return tickers
+
+def obter_tickers_scraping():
+    try:
+        resp = requests.get("https://www.dadosdemercado.com.br/acoes", timeout=10, headers={'User-Agent':'Mozilla/5.0'})
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.content, 'html.parser')
+        tickers = []
+        for row in soup.select('table tbody tr'):
+            cells = row.find_all('td')
+            if cells and not cells[0].text.strip().startswith('#'):
+                tickers.append(cells[0].text.strip().replace('.SA', ''))
+        return tickers
+    except Exception as e:
+        logger.warn(f"Scraping falhou: {e}")
+        return []
+
+def obter_tickers_b3():
+    if os.path.exists(CACHE_TICKERS_FILE):
+        try:
+            with open(CACHE_TICKERS_FILE) as f:
+                cache = json.load(f)
+            if (datetime.now() - datetime.fromisoformat(cache['timestamp'])).total_seconds() / 3600 < 24:
+                return cache['tickers']
+        except:
+            pass
+    tickers = []
+    if BRAPI_TOKEN:
+        tickers = obter_tickers_brapi()
+    if not tickers:
+        tickers = obter_tickers_scraping()
+    if not tickers:
+        tickers = FALLBACK_TICKERS.copy()
+    if tickers:
+        with open(CACHE_TICKERS_FILE, 'w') as f:
+            json.dump({'timestamp': datetime.now().isoformat(), 'tickers': tickers}, f)
+    return tickers
+
+# ==================== FUNÇÕES AUXILIARES (PIVÔS, ATR, ZSCORE, FIBONACCI) ====================
+def encontrar_picos(series, ordem=PIVO_ORDEM, modo='max'):
+    if SCIPY_AVAILABLE:
+        if modo == 'max':
+            indices = argrelextrema(series.values, np.greater, order=ordem)[0]
+        else:
+            indices = argrelextrema(series.values, np.less, order=ordem)[0]
+        return [(int(i), series.iloc[i]) for i in indices if i > ordem and i < len(series)-ordem]
+    else:
+        pivos = []
+        for i in range(ordem, len(series)-ordem):
+            if modo == 'max' and series.iloc[i] == max(series.iloc[i-ordem:i+ordem+1]):
+                pivos.append((i, series.iloc[i]))
+            elif modo == 'min' and series.iloc[i] == min(series.iloc[i-ordem:i+ordem+1]):
+                pivos.append((i, series.iloc[i]))
+        return pivos
+
+def calcular_atr(df, periodo=ATR_PERIODOS):
+    try:
+        atr_serie = ta.atr(df['High'], df['Low'], df['Close'], length=periodo)
+        return float(atr_serie.iloc[-1]) if atr_serie is not None and not atr_serie.empty else 0.0
+    except:
+        return 0.0
+
+def zscore(serie, valor, window=20):
+    if len(serie) < window:
+        return 0.0
+    hist = serie.iloc[-window:]
+    media = hist.mean()
+    std = hist.std()
+    if std == 0:
+        return 0.0
+    return (valor - media) / std
+
+def calcular_fibonacci_retracao(df, n_barras=50):
+    if len(df) < n_barras:
+        return None
+    highs = df['High']
+    lows = df['Low']
+    max_idx = highs.rolling(n_barras).max().idxmax()
+    min_idx = lows.rolling(n_barras).min().idxmin()
+    if max_idx < min_idx:
+        topo = highs.loc[max_idx:min_idx].max()
+        fundo = lows.loc[max_idx:min_idx].min()
+    else:
+        topo = highs.loc[min_idx:max_idx].max()
+        fundo = lows.loc[min_idx:max_idx].min()
+    if topo <= fundo or fundo <= 0:
+        return None
+    diff = topo - fundo
+    return {'38.2%': round(topo - diff*0.382, 2), '50.0%': round(topo - diff*0.5, 2), '61.8%': round(topo - diff*0.618, 2)}
+
+def preco_em_zona_interesse(df, preco, direcao, tolerancia=0.02):
+    suportes = [v for _, v in encontrar_picos(df['Low'], modo='min')[-10:]]
+    resistencias = [v for _, v in encontrar_picos(df['High'], modo='max')[-10:]]
+    fib = calcular_fibonacci_retracao(df)
+    niveis = []
+    if fib:
+        niveis.extend([fib['38.2%'], fib['50.0%'], fib['61.8%']])
+    if direcao == 'COMPRA':
+        for sup in suportes:
+            if abs(preco - sup) / sup <= tolerancia:
+                return True
+        for niv in niveis:
+            if abs(preco - niv) / niv <= tolerancia:
+                return True
+    else:
+        for res in resistencias:
+            if abs(res - preco) / preco <= tolerancia:
+                return True
+        for niv in niveis:
+            if abs(niv - preco) / preco <= tolerancia:
+                return True
+    return False
+
+def contar_toques_nivel(df, nivel, tolerancia=0.02, lookback=60):
+    if nivel is None or len(df) < lookback:
+        return 0, 0
+    janela = df.iloc[-lookback:]
+    toques = 0
+    for i in range(len(janela)):
+        low = janela['Low'].iloc[i]
+        high = janela['High'].iloc[i]
+        if abs(low - nivel) / nivel <= tolerancia or abs(high - nivel) / nivel <= tolerancia:
+            toques += 1
+    excedente = max(0, toques - MAX_TOQUES_NIVEL)
+    penalidade = excedente * 5
+    return toques, penalidade
+
+def candle_tocou_zona(df, direcao, nivel, tolerancia=0.015):
+    if nivel is None:
+        return False
+    row = df.iloc[-1]
+    if direcao == 'COMPRA':
+        return row['Low'] <= nivel * (1 + tolerancia)
+    else:
+        return row['High'] >= nivel * (1 - tolerancia)
+
+# ==================== PADRÕES DE VELA ====================
+def detectar_harami(row, row_ant, direcao='COMPRA'):
+    if row_ant is None:
+        return False
+    corpo_atual = abs(row['Close'] - row['Open'])
+    corpo_ant = abs(row_ant['Close'] - row_ant['Open'])
+    if corpo_ant == 0:
+        return False
+    if direcao == 'COMPRA':
+        return (row['Close'] > row['Open'] and row_ant['Close'] < row_ant['Open'] and
+                row['Open'] >= row_ant['Close'] and row['Close'] <= row_ant['Open'] and
+                corpo_atual <= corpo_ant * 0.8)
+    else:
+        return (row['Close'] < row['Open'] and row_ant['Close'] > row_ant['Open'] and
+                row['Open'] <= row_ant['Close'] and row['Close'] >= row_ant['Open'] and
+                corpo_atual <= corpo_ant * 0.8)
+
+def detectar_nuvem_negra(row, row_ant):
+    if row_ant is None:
+        return False
+    if not (row_ant['Close'] > row_ant['Open']):
+        return False
+    if not (row['Close'] < row['Open']):
+        return False
+    if row['Open'] <= row_ant['Close']:
+        return False
+    if row['Close'] >= row_ant['Open']:
+        return False
+    return True
+
+def detectar_3_soldados(df):
+    if len(df) < 3:
+        return False
+    c1, c2, c3 = df.iloc[-3], df.iloc[-2], df.iloc[-1]
+    if not (c1['Close'] > c1['Open'] and c2['Close'] > c2['Open'] and c3['Close'] > c3['Open']):
+        return False
+    if not (c2['Open'] > c1['Close'] and c2['Open'] < c1['Open']):
+        return False
+    if not (c3['Open'] > c2['Close'] and c3['Open'] < c2['Open']):
+        return False
+    if not (c2['Close'] > c1['High'] and c3['Close'] > c2['High']):
+        return False
+    return True
+
+def detectar_3_corvos(df):
+    if len(df) < 3:
+        return False
+    c1, c2, c3 = df.iloc[-3], df.iloc[-2], df.iloc[-1]
+    if not (c1['Close'] < c1['Open'] and c2['Close'] < c2['Open'] and c3['Close'] < c3['Open']):
+        return False
+    if not (c2['Open'] < c1['Close'] and c2['Open'] > c1['Open']):
+        return False
+    if not (c3['Open'] < c2['Close'] and c3['Open'] > c2['Open']):
+        return False
+    if not (c2['Close'] < c1['Low'] and c3['Close'] < c2['Low']):
+        return False
+    return True
+
+def detectar_martelo(row, direcao='COMPRA'):
+    corpo = abs(row['Close'] - row['Open'])
+    range_total = row['High'] - row['Low']
+    if range_total == 0:
+        return False
+    if corpo > range_total * 0.35:
+        return False
+    if direcao == 'COMPRA':
+        sombra_inf = min(row['Open'], row['Close']) - row['Low']
+        sombra_sup = row['High'] - max(row['Open'], row['Close'])
+        return sombra_inf >= 2 * corpo and sombra_sup <= corpo * 0.5
+    return False
+
+def detectar_estrela_cadente(row):
+    corpo = abs(row['Close'] - row['Open'])
+    range_total = row['High'] - row['Low']
+    if range_total == 0:
+        return False
+    sombra_sup = row['High'] - max(row['Open'], row['Close'])
+    sombra_inf = min(row['Open'], row['Close']) - row['Low']
+    return (sombra_sup >= 2 * corpo and corpo <= range_total * 0.35 and sombra_inf <= corpo * 0.5)
+
+def detectar_doji(row):
+    corpo = abs(row['Close'] - row['Open'])
+    range_total = row['High'] - row['Low']
+    if range_total == 0:
+        return True
+    return corpo <= range_total * 0.05
+
+def detectar_engolfo_compra(row, row_ant):
+    if row_ant is None:
+        return False
+    corpo_atual = abs(row['Close'] - row['Open'])
+    corpo_ant = abs(row_ant['Close'] - row_ant['Open'])
+    if corpo_ant == 0:
+        return False
+    return (row['Close'] > row['Open'] and row_ant['Close'] < row_ant['Open'] and
+            row['Open'] <= row_ant['Close'] and row['Close'] >= row_ant['Open'])
+
+def detectar_engolfo_baixa(row, row_ant):
+    if row_ant is None:
+        return False
+    corpo_atual = abs(row['Close'] - row['Open'])
+    corpo_ant = abs(row_ant['Close'] - row_ant['Open'])
+    if corpo_ant == 0:
+        return False
+    return (row['Close'] < row['Open'] and row_ant['Close'] > row_ant['Open'] and
+            row['Open'] >= row_ant['Close'] and row['Close'] <= row_ant['Open'])
+
+def detectar_kicker_baixa(row, row_ant):
+    if row_ant is None:
+        return False
+    corpo = abs(row['Close'] - row['Open'])
+    range_total = row['High'] - row['Low']
+    if range_total == 0:
+        return False
+    return (row['Open'] < row_ant['Low'] and row['Close'] < row['Open'] and corpo / range_total >= 0.7)
+
+def validar_candle_forca_v2(df, direcao='COMPRA', window=20):
+    if len(df) < window + 1:
+        return False, "dados insuficientes"
+    row = df.iloc[-1]
+    rng = row['High'] - row['Low']
+    if rng <= 0:
+        return False, "range zero"
+    corpo = abs(row['Close'] - row['Open'])
+    corpos_hist = (df['Close'] - df['Open']).abs().iloc[-(window+1):-1]
+    media_corpo = corpos_hist.mean()
+    if len(corpos_hist) < 5:
+        return False, "poucos dados históricos"
+    std_corpo = corpos_hist.std()
+    if std_corpo == 0:
+        return False, "sem variação de corpo"
+    z_corpo = (corpo - media_corpo) / std_corpo
+    if z_corpo < 0.75:
+        return False, f"corpo Z-Score {z_corpo:.1f} < 1.0"
+    if direcao == 'COMPRA':
+        fech_rel = (row['Close'] - row['Low']) / rng
+        if fech_rel < 0.75:
+            return False, f"fechamento a {fech_rel:.0%} da mínima"
+    else:
+        fech_rel = (row['High'] - row['Close']) / rng
+        if fech_rel < 0.75:
+            return False, f"fechamento a {fech_rel:.0%} da máxima"
+    return True, f"OK (Z-Corpo {z_corpo:.1f})"
+
+def classificar_candle(row, row_anterior, direcao):
+    padroes = []
+    if direcao == 'COMPRA':
+        if detectar_martelo(row, 'COMPRA'):
+            padroes.append('Martelo')
+        if row_anterior is not None and detectar_engolfo_compra(row, row_anterior):
+            padroes.append('Engolfo de Alta')
+    else:
+        if detectar_estrela_cadente(row):
+            padroes.append('Estrela Cadente')
+        if row_anterior is not None and detectar_engolfo_baixa(row, row_anterior):
+            padroes.append('Engolfo de Baixa')
+        if row_anterior is not None and detectar_kicker_baixa(row, row_anterior):
+            padroes.append('Kicker de Baixa')
+    if detectar_doji(row):
+        padroes.append('Doji')
+    corpo = abs(row['Close'] - row['Open'])
+    rng = row['High'] - row['Low']
+    if rng > 0 and corpo / rng >= 0.8:
+        padroes.append('Corpo Longo')
+    if USAR_HARAMI and row_anterior is not None and detectar_harami(row, row_anterior, direcao):
+        padroes.append('Harami')
+    if USAR_NUVEM_NEGRA and row_anterior is not None and detectar_nuvem_negra(row, row_anterior):
+        padroes.append('Nuvem Negra')
+    return padroes
+
+# ==================== PADRÕES GRÁFICOS ====================
+def detectar_cunha_ascendente(df, min_pontos=2):
+    if len(df) < 40:
+        return False, {}
+    highs = encontrar_picos(df['High'], modo='max')[-min_pontos*2:]
+    lows = encontrar_picos(df['Low'], modo='min')[-min_pontos*2:]
+    if len(highs) < min_pontos or len(lows) < min_pontos:
+        return False, {}
+    topos = [v for _, v in highs[-min_pontos:]]
+    fundos = [v for _, v in lows[-min_pontos:]]
+    if (all(fundos[i] < fundos[i+1] for i in range(len(fundos)-1)) and
+        all(topos[i] < topos[i+1] for i in range(len(topos)-1)) and
+        (topos[-1] - topos[0]) < (fundos[-1] - fundos[0])):
+        altura = max(topos) - min(fundos)
+        return True, {'tipo': 'Cunha Ascendente', 'altura': altura}
+    return False, {}
+
+def detectar_cunha_descendente(df, min_pontos=2):
+    if len(df) < 40:
+        return False, {}
+    highs = encontrar_picos(df['High'], modo='max')[-min_pontos*2:]
+    lows = encontrar_picos(df['Low'], modo='min')[-min_pontos*2:]
+    if len(highs) < min_pontos or len(lows) < min_pontos:
+        return False, {}
+    topos = [v for _, v in highs[-min_pontos:]]
+    fundos = [v for _, v in lows[-min_pontos:]]
+    if (all(fundos[i] > fundos[i+1] for i in range(len(fundos)-1)) and
+        all(topos[i] > topos[i+1] for i in range(len(topos)-1)) and
+        (topos[0] - topos[-1]) < (fundos[0] - fundos[-1])):
+        altura = max(topos) - min(fundos)
+        return True, {'tipo': 'Cunha Descendente', 'altura': altura}
+    return False, {}
+
+def detectar_alargamento(df, min_pontos=2):
+    if len(df) < 40:
+        return False, {}
+    highs = encontrar_picos(df['High'], modo='max')[-min_pontos*2:]
+    lows = encontrar_picos(df['Low'], modo='min')[-min_pontos*2:]
+    if len(highs) < min_pontos or len(lows) < min_pontos:
+        return False, {}
+    topos = [v for _, v in highs[-min_pontos:]]
+    fundos = [v for _, v in lows[-min_pontos:]]
+    if (all(topos[i] < topos[i+1] for i in range(len(topos)-1)) and
+        all(fundos[i] > fundos[i+1] for i in range(len(fundos)-1))):
+        return True, {'tipo': 'Alargamento (Megafone)', 'altura': topos[-1] - fundos[-1]}
+    return False, {}
+
+def detectar_topo_fundo_arredondado(df, lookback=120):
+    if len(df) < lookback:
+        return False, {}
+    trecho = df.iloc[-lookback:]
+    precos = trecho['Close']
+    x = np.arange(len(precos))
+    coeffs = np.polyfit(x, precos, 2)
+    curvatura = coeffs[0]
+    vol = trecho['Volume']
+    idx_min_vol = vol.idxmin()
+    midpoint = len(precos) // 2
+    if abs(vol.index.get_loc(idx_min_vol) - midpoint) > len(precos) * 0.3:
+        return False, {}
+    if curvatura > 0.0001:
+        return True, {'tipo': 'Fundo Arredondado (Pires)', 'altura': precos.iloc[-1] - precos.min()}
+    elif curvatura < -0.0001:
+        return True, {'tipo': 'Topo Arredondado (Abóbada)', 'altura': precos.max() - precos.iloc[-1]}
+    return False, {}
+
+def detectar_climax(df, media_volume):
+    if len(df) < 20:
+        return None
+    row = df.iloc[-1]
+    vol = df['Volume'].iloc[-1]
+    corpo = abs(row['Close'] - row['Open'])
+    rng = row['High'] - row['Low']
+    corpo_peq = (rng > 0) and (corpo / rng < 0.5)
+    mme20 = df['Close'].ewm(span=20).mean()
+    if vol > media_volume * 2.0 and corpo_peq:
+        if df['Close'].iloc[-1] > mme20.iloc[-1] and df['Close'].iloc[-2] > mme20.iloc[-2]:
+            return 'Clímax de Compra'
+        elif df['Close'].iloc[-1] < mme20.iloc[-1] and df['Close'].iloc[-2] < mme20.iloc[-2]:
+            return 'Clímax de Venda'
+    return None
+
+def verificar_extensao_preco(df):
+    if len(df) < 20:
+        return False
+    mm20 = df['Close'].rolling(20).mean().iloc[-1]
+    mm200 = df['Close'].rolling(200).mean().iloc[-1] if len(df) >= 200 else mm20
+    preco = df['Close'].iloc[-1]
+    dist_20 = abs(preco - mm20) / mm20 * 100
+    dist_200 = abs(preco - mm200) / mm200 * 100
+    return dist_20 > EXTENSAO_MM20_MAX or dist_200 > EXTENSAO_MM200_MAX
+
+def detectar_sensibilidade_canal(df):
+    if len(df) < 60:
+        return False
+    highs = encontrar_picos(df['High'], modo='max')[-5:]
+    lows = encontrar_picos(df['Low'], modo='min')[-5:]
+    if len(highs) < 3 or len(lows) < 3:
+        return False
+    if all(lows[i][1] < lows[i+1][1] for i in range(len(lows)-1)):
+        ultimos_topos = highs[-3:]
+        if ultimos_topos[-1][1] <= ultimos_topos[-2][1]:
+            return True
+    elif all(highs[i][1] > highs[i+1][1] for i in range(len(highs)-1)):
+        ultimos_fundos = lows[-3:]
+        if ultimos_fundos[-1][1] >= ultimos_fundos[-2][1]:
+            return True
+    return False
+
+def verificar_cruzamento_medias(df, direcao='COMPRA'):
+    if len(df) < 22:
+        return False
+    mm9 = df['Close'].rolling(9).mean()
+    mm21 = df['Close'].rolling(21).mean()
+    if direcao == 'COMPRA':
+        return mm9.iloc[-1] > mm21.iloc[-1] and mm9.iloc[-2] <= mm21.iloc[-2]
+    else:
+        return mm9.iloc[-1] < mm21.iloc[-1] and mm9.iloc[-2] >= mm21.iloc[-2]
+
+# ==================== OBV E DIVERGÊNCIAS ====================
+def calcular_obv(df):
+    obv = [0]
+    for i in range(1, len(df)):
+        if df['Close'].iloc[i] > df['Close'].iloc[i-1]:
+            obv.append(obv[-1] + df['Volume'].iloc[i])
+        elif df['Close'].iloc[i] < df['Close'].iloc[i-1]:
+            obv.append(obv[-1] - df['Volume'].iloc[i])
+        else:
+            obv.append(obv[-1])
+    return pd.Series(obv, index=df.index)
+
+def obv_antecipacao(df, direcao):
+    if len(df) < 50:
+        return False
+    obv = calcular_obv(df)
+    if direcao == 'COMPRA':
+        topos_preco = encontrar_picos(df['High'], modo='max')
+        if len(topos_preco) < 1:
+            return False
+        idx_topo, valor_topo = topos_preco[-1]
+        obv_topo = obv.iloc[idx_topo]
+        return obv.iloc[-1] > obv_topo and df['Close'].iloc[-1] < valor_topo
+    else:
+        fundos_preco = encontrar_picos(df['Low'], modo='min')
+        if len(fundos_preco) < 1:
+            return False
+        idx_fundo, valor_fundo = fundos_preco[-1]
+        obv_fundo = obv.iloc[idx_fundo]
+        return obv.iloc[-1] < obv_fundo and df['Close'].iloc[-1] > valor_fundo
+
+def detectar_divergencia_oscilador(df, oscilador='IFR', direcao='COMPRA'):
+    if len(df) < 50:
+        return False
+    if oscilador == 'IFR':
+        serie_osc = ta.rsi(df['Close'], length=14)
+    elif oscilador == 'MACD':
+        serie_osc = ta.macd(df['Close'], fast=12, slow=26, signal=9)['MACD_12_26_9']
+    else:
+        return False
+    if direcao == 'COMPRA':
+        fundos_preco = encontrar_picos(df['Low'], modo='min')
+        if len(fundos_preco) < 2:
+            return False
+        f1, f2 = fundos_preco[-2], fundos_preco[-1]
+        if f2[1] < f1[1]:
+            osc1 = serie_osc.iloc[f1[0]] if f1[0] < len(serie_osc) else np.nan
+            osc2 = serie_osc.iloc[f2[0]] if f2[0] < len(serie_osc) else np.nan
+            if pd.notna(osc1) and pd.notna(osc2) and osc2 > osc1:
+                return True
+    else:
+        topos_preco = encontrar_picos(df['High'], modo='max')
+        if len(topos_preco) < 2:
+            return False
+        t1, t2 = topos_preco[-2], topos_preco[-1]
+        if t2[1] > t1[1]:
+            osc1 = serie_osc.iloc[t1[0]] if t1[0] < len(serie_osc) else np.nan
+            osc2 = serie_osc.iloc[t2[0]] if t2[0] < len(serie_osc) else np.nan
+            if pd.notna(osc1) and pd.notna(osc2) and osc2 < osc1:
+                return True
+    return False
+
+def detectar_divergencia_contraria_oscilador(df, oscilador='IFR', direcao='COMPRA'):
+    if len(df) < 50:
+        return False
+    if oscilador == 'IFR':
+        serie_osc = ta.rsi(df['Close'], length=14)
+    elif oscilador == 'MACD':
+        serie_osc = ta.macd(df['Close'], fast=12, slow=26, signal=9)['MACD_12_26_9']
+    else:
+        return False
+    if direcao == 'COMPRA':
+        topos_preco = encontrar_picos(df['High'], modo='max')
+        if len(topos_preco) < 2:
+            return False
+        t1, t2 = topos_preco[-2], topos_preco[-1]
+        if t2[1] > t1[1]:
+            osc1 = serie_osc.iloc[t1[0]] if t1[0] < len(serie_osc) else np.nan
+            osc2 = serie_osc.iloc[t2[0]] if t2[0] < len(serie_osc) else np.nan
+            if pd.notna(osc1) and pd.notna(osc2) and osc2 < osc1:
+                return True
+    else:
+        fundos_preco = encontrar_picos(df['Low'], modo='min')
+        if len(fundos_preco) < 2:
+            return False
+        f1, f2 = fundos_preco[-2], fundos_preco[-1]
+        if f2[1] < f1[1]:
+            osc1 = serie_osc.iloc[f1[0]] if f1[0] < len(serie_osc) else np.nan
+            osc2 = serie_osc.iloc[f2[0]] if f2[0] < len(serie_osc) else np.nan
+            if pd.notna(osc1) and pd.notna(osc2) and osc2 > osc1:
+                return True
+    return False
+
+# ==================== GAPS ====================
+def detectar_gap(df, i=-1):
+    if len(df) < abs(i)+2:
+        return None
+    row, row_ant = df.iloc[i], df.iloc[i-1]
+    if row['Low'] > row_ant['High']:
+        return ('ALTA', (row['Low'] - row_ant['High']) / row_ant['High'])
+    elif row['High'] < row_ant['Low']:
+        return ('BAIXA', (row_ant['Low'] - row['High']) / row_ant['Low'])
+    return None
+
+def classificar_gap(df, atr, media_volume):
+    gap_info = detectar_gap(df)
+    if gap_info is None:
+        return None
+    tipo, tamanho = gap_info
+    if tamanho * df['Close'].iloc[-1] < GAP_MIN_ATR_MULT * atr:
+        return None
+    vol = df['Volume'].iloc[-1]
+    z_vol = zscore(df['Volume'], vol, window=20)
+    if z_vol >= Z_GAP_FUGA:
+        return 'Fuga'
+    row = df.iloc[-1]
+    corpo = abs(row['Close'] - row['Open'])
+    rng = row['High'] - row['Low']
+    corpo_pequeno = (rng > 0) and (corpo / rng < 0.5)
+    mme20 = df['Close'].ewm(span=20).mean()
+    acima_mme = (df['Close'] > mme20).tail(15).sum()
+    rsi = ta.rsi(df['Close'], length=14)
+    rsi_atual = rsi.iloc[-1] if rsi is not None and len(rsi) > 0 else 50
+    if z_vol >= Z_GAP_EXAUSTAO and corpo_pequeno:
+        if tipo == 'ALTA' and acima_mme >= 15 and rsi_atual > 70:
+            return 'Exaustão'
+        elif tipo == 'BAIXA' and acima_mme <= 0 and rsi_atual < 30:
+            return 'Exaustão'
+    return 'Comum'
+
+# ==================== FIBONACCI ALVOS ====================
+def calcular_expansao_fibonacci(df, direcao):
+    if len(df) < 30:
+        return None
+    if direcao == 'COMPRA':
+        fundos = encontrar_picos(df['Low'], modo='min')
+        topos = encontrar_picos(df['High'], modo='max')
+        if len(fundos) < 2 or len(topos) < 1:
+            return None
+        fundo1 = fundos[-2][1]
+        topo = max([t[1] for t in topos if t[0] > fundos[-2][0]] + [fundos[-1][1]])
+        fundo2 = fundos[-1][1]
+        diff = topo - fundo1
+        if diff <= 0:
+            return None
+        return {'161.8%': round(fundo2 + diff * 1.618, 2), '261.8%': round(fundo2 + diff * 2.618, 2)}
+    else:
+        topos = encontrar_picos(df['High'], modo='max')
+        fundos = encontrar_picos(df['Low'], modo='min')
+        if len(topos) < 2 or len(fundos) < 1:
+            return None
+        topo1 = topos[-2][1]
+        fundo = min([f[1] for f in fundos if f[0] > topos[-2][0]] + [topos[-1][1]])
+        topo2 = topos[-1][1]
+        diff = topo1 - fundo
+        if diff <= 0:
+            return None
+        return {'161.8%': round(topo2 - diff * 1.618, 2), '261.8%': round(topo2 - diff * 2.618, 2)}
+
+# ==================== BOLLINGER ====================
+def calcular_bollinger_squeeze(df, lookback=BOLLINGER_SQUEEZE_LOOKBACK, tol=BOLLINGER_SQUEEZE_TOL):
+    if len(df) < lookback:
+        return False
+    bbands = ta.bbands(df['Close'], length=20, std=2)
+    if bbands is None:
+        return False
+    col_sup = [c for c in bbands.columns if c.startswith('BBU')][0]
+    col_inf = [c for c in bbands.columns if c.startswith('BBL')][0]
+    col_media = [c for c in bbands.columns if c.startswith('BBM')][0]
+    banda_sup, banda_inf, banda_media = bbands[col_sup], bbands[col_inf], bbands[col_media]
+    largura_atual = (banda_sup.iloc[-1] - banda_inf.iloc[-1]) / banda_media.iloc[-1]
+    historico_largura = (banda_sup - banda_inf) / banda_media
+    minimo_historico = historico_largura.rolling(lookback).min().iloc[-1]
+    return largura_atual <= minimo_historico * tol
+
+# ==================== PULLBACK ====================
+def verificar_pullback(df, linha_rompida, direcao, media_volume):
+    if len(df) < 3:
+        return False, None
+    for i in range(-5, 0):
+        row = df.iloc[i]
+        if direcao == 'COMPRA':
+            if row['Low'] <= linha_rompida * (1 + PULLBACK_TOLERANCIA_PCT) and row['Low'] >= linha_rompida * (1 - PULLBACK_TOLERANCIA_PCT):
+                if df['Volume'].iloc[i] < media_volume * PULLBACK_VOLUME_MAX_PCT:
+                    row_ant = df.iloc[i-1] if abs(i) < len(df) else None
+                    if detectar_martelo(row, 'COMPRA') or (row_ant is not None and detectar_engolfo_compra(row, row_ant)):
+                        return True, row
+        else:
+            if row['High'] <= linha_rompida * (1 + PULLBACK_TOLERANCIA_PCT) and row['High'] >= linha_rompida * (1 - PULLBACK_TOLERANCIA_PCT):
+                if df['Volume'].iloc[i] < media_volume * PULLBACK_VOLUME_MAX_PCT:
+                    row_ant = df.iloc[i-1] if abs(i) < len(df) else None
+                    if detectar_estrela_cadente(row) or (row_ant is not None and detectar_engolfo_baixa(row, row_ant)):
+                        return True, row
+    return False, None
+
+# ==================== PADRÕES GRÁFICOS (CONTINUAÇÃO) ====================
+def _mesmo_nivel(vals, tol=TOLERANCIA_NIVEL):
+    if len(vals) < 2:
+        return True
+    ref = vals[0]
+    return all(abs(v - ref) / ref <= tol for v in vals)
+
+def detectar_triangulo_simetrico(df, min_pontos=2):
+    if len(df) < 30:
+        return False, {}
+    highs = encontrar_picos(df['High'], modo='max')[-min_pontos*2:]
+    lows = encontrar_picos(df['Low'], modo='min')[-min_pontos*2:]
+    if len(highs) < min_pontos or len(lows) < min_pontos:
+        return False, {}
+    topos = [v for _, v in highs[-min_pontos:]]
+    fundos = [v for _, v in lows[-min_pontos:]]
+    if all(topos[i] > topos[i+1] for i in range(len(topos)-1)) and all(fundos[i] < fundos[i+1] for i in range(len(fundos)-1)):
+        return True, {'tipo': 'Triângulo Simétrico', 'altura': max(topos) - min(fundos)}
+    return False, {}
+
+def detectar_triangulo_ascendente(df, min_pontos=2):
+    if len(df) < 30:
+        return False, {}
+    highs = encontrar_picos(df['High'], modo='max')[-min_pontos:]
+    lows = encontrar_picos(df['Low'], modo='min')[-min_pontos*2:]
+    if len(highs) < min_pontos or len(lows) < min_pontos:
+        return False, {}
+    topos = [v for _, v in highs]
+    fundos = [v for _, v in lows[-min_pontos:]]
+    if _mesmo_nivel(topos) and all(fundos[i] < fundos[i+1] for i in range(len(fundos)-1)):
+        return True, {'tipo': 'Triângulo Ascendente', 'altura': max(topos) - min(fundos), 'resistencia': topos[0]}
+    return False, {}
+
+def detectar_triangulo_descendente(df, min_pontos=2):
+    if len(df) < 30:
+        return False, {}
+    highs = encontrar_picos(df['High'], modo='max')[-min_pontos*2:]
+    lows = encontrar_picos(df['Low'], modo='min')[-min_pontos:]
+    if len(highs) < min_pontos or len(lows) < min_pontos:
+        return False, {}
+    topos = [v for _, v in highs[-min_pontos:]]
+    fundos = [v for _, v in lows]
+    if _mesmo_nivel(fundos) and all(topos[i] > topos[i+1] for i in range(len(topos)-1)):
+        return True, {'tipo': 'Triângulo Descendente', 'altura': max(topos) - min(fundos), 'suporte': fundos[0]}
+    return False, {}
+
+def detectar_retangulo(df, min_toques=2):
+    if len(df) < 20:
+        return False, {}
+    highs = encontrar_picos(df['High'], modo='max')[-min_toques:]
+    lows = encontrar_picos(df['Low'], modo='min')[-min_toques:]
+    if len(highs) < min_toques or len(lows) < min_toques:
+        return False, {}
+    topos = [v for _, v in highs]
+    fundos = [v for _, v in lows]
+    if _mesmo_nivel(topos) and _mesmo_nivel(fundos):
+        return True, {'tipo': 'Retângulo', 'altura': topos[0] - fundos[0], 'resistencia': topos[0], 'suporte': fundos[0]}
+    return False, {}
+
+def detectar_oco(df, tipo='topo'):
+    if len(df) < 50:
+        return False, {}
+    if tipo == 'topo':
+        picos = encontrar_picos(df['High'], modo='max')
+        if len(picos) < 3:
+            return False, {}
+        ombro_e, cabeca, ombro_d = picos[-3], picos[-2], picos[-1]
+        if not (cabeca[1] > ombro_e[1] and cabeca[1] > ombro_d[1]):
+            return False, {}
+        if abs(ombro_e[1] - ombro_d[1]) / ombro_e[1] > TOLERANCIA_OMBRO:
+            return False, {}
+        vol_ombro_e = df['Volume'].iloc[ombro_e[0]]
+        vol_cabeca = df['Volume'].iloc[cabeca[0]]
+        vol_ombro_d = df['Volume'].iloc[ombro_d[0]]
+        if not (vol_ombro_d < vol_cabeca):
+            return False, {}
+        vale1 = min(df['Low'].iloc[ombro_e[0]:cabeca[0]])
+        vale2 = min(df['Low'].iloc[cabeca[0]:ombro_d[0]])
+        neckline = (vale1 + vale2) / 2
+        return True, {'tipo': 'OCO Topo', 'altura': cabeca[1] - neckline, 'neckline': neckline}
+    else:
+        vales = encontrar_picos(df['Low'], modo='min')
+        if len(vales) < 3:
+            return False, {}
+        ombro_e, cabeca, ombro_d = vales[-3], vales[-2], vales[-1]
+        if not (cabeca[1] < ombro_e[1] and cabeca[1] < ombro_d[1]):
+            return False, {}
+        if abs(ombro_e[1] - ombro_d[1]) / ombro_e[1] > TOLERANCIA_OMBRO:
+            return False, {}
+        vol_ombro_e = df['Volume'].iloc[ombro_e[0]]
+        vol_cabeca = df['Volume'].iloc[cabeca[0]]
+        vol_ombro_d = df['Volume'].iloc[ombro_d[0]]
+        if not (vol_ombro_d < vol_cabeca):
+            return False, {}
+        pico1 = max(df['High'].iloc[ombro_e[0]:cabeca[0]])
+        pico2 = max(df['High'].iloc[cabeca[0]:ombro_d[0]])
+        neckline = (pico1 + pico2) / 2
+        return True, {'tipo': 'OCO Invertido', 'altura': neckline - cabeca[1], 'neckline': neckline}
+
+def detectar_duplo_topo(df):
+    picos = encontrar_picos(df['High'], modo='max')[-2:]
+    if len(picos) < 2:
+        return False, {}
+    t1, t2 = picos[-2], picos[-1]
+    if abs(t1[1] - t2[1]) / t1[1] <= TOLERANCIA_NIVEL:
+        vale = min(df['Low'].iloc[t1[0]:t2[0]])
+        return True, {'tipo': 'Topo Duplo', 'altura': t1[1] - vale}
+    return False, {}
+
+def detectar_duplo_fundo(df):
+    vales = encontrar_picos(df['Low'], modo='min')[-2:]
+    if len(vales) < 2:
+        return False, {}
+    f1, f2 = vales[-2], vales[-1]
+    if abs(f1[1] - f2[1]) / f1[1] <= TOLERANCIA_NIVEL:
+        pico = max(df['High'].iloc[f1[0]:f2[0]])
+        return True, {'tipo': 'Fundo Duplo', 'altura': pico - f1[1]}
+    return False, {}
+
+def detectar_triplo_topo(df):
+    picos = encontrar_picos(df['High'], modo='max')[-3:]
+    if len(picos) < 3:
+        return False, {}
+    t1, t2, t3 = picos[-3], picos[-2], picos[-1]
+    if all(abs(t[1] - t1[1]) / t1[1] <= TOLERANCIA_NIVEL for t in [t1, t2, t3]):
+        vale = min(min(df['Low'].iloc[t1[0]:t2[0]]), min(df['Low'].iloc[t2[0]:t3[0]]))
+        return True, {'tipo': 'Topo Triplo', 'altura': t1[1] - vale}
+    return False, {}
+
+def detectar_triplo_fundo(df):
+    vales = encontrar_picos(df['Low'], modo='min')[-3:]
+    if len(vales) < 3:
+        return False, {}
+    f1, f2, f3 = vales[-3], vales[-2], vales[-1]
+    if all(abs(f[1] - f1[1]) / f1[1] <= TOLERANCIA_NIVEL for f in [f1, f2, f3]):
+        pico = max(max(df['High'].iloc[f1[0]:f2[0]]), max(df['High'].iloc[f2[0]:f3[0]]))
+        return True, {'tipo': 'Fundo Triplo', 'altura': pico - f1[1]}
+    return False, {}
+
+def detectar_bandeira(df, max_dias=20):
+    if len(df) < max_dias + 10:
+        return False, {}
+    preco_inicio = df['Close'].iloc[-max_dias-10]
+    preco_fim_mastro = df['Close'].iloc[-max_dias]
+    mastro = abs(preco_fim_mastro - preco_inicio)
+    if mastro / preco_inicio < 0.05:
+        return False, {}
+    alt_max = df['High'].iloc[-max_dias:].max()
+    alt_min = df['Low'].iloc[-max_dias:].min()
+    if (alt_max - alt_min) > 0.5 * mastro:
+        return False, {}
+    direcao = 'COMPRA' if preco_fim_mastro > preco_inicio else 'VENDA'
+    return True, {'tipo': 'Bandeira', 'mastro': mastro, 'direcao': direcao}
+
+def detectar_flamula(df, max_dias=15):
+    if len(df) < max_dias + 10:
+        return False, {}
+    preco_inicio = df['Close'].iloc[-max_dias-10]
+    preco_fim_mastro = df['Close'].iloc[-max_dias]
+    mastro = abs(preco_fim_mastro - preco_inicio)
+    if mastro / preco_inicio < 0.05:
+        return False, {}
+    highs = df['High'].iloc[-max_dias:]
+    lows = df['Low'].iloc[-max_dias:]
+    picos = encontrar_picos(highs, ordem=2, modo='max')
+    vales = encontrar_picos(lows, ordem=2, modo='min')
+    if len(picos) >= 2 and len(vales) >= 2:
+        if all(picos[i][1] > picos[i+1][1] for i in range(len(picos)-1)) and all(vales[i][1] < vales[i+1][1] for i in range(len(vales)-1)):
+            direcao = 'COMPRA' if preco_fim_mastro > preco_inicio else 'VENDA'
+            return True, {'tipo': 'Flâmula', 'mastro': mastro, 'direcao': direcao}
+    return False, {}
+
+def detectar_cup_handle(df, max_alca_dias=14):
+    if len(df) < 60:
+        return False, {}
+    highs = df['High']
+    topo_inicio = highs.iloc[-60:].max()
+    idx_topo = highs.idxmax()
+    apos_topo = df.loc[idx_topo:]
+    fundo = apos_topo['Low'].min()
+    profundidade = (topo_inicio - fundo) / topo_inicio
+    if not (0.3 <= profundidade <= CUP_TOPO_CORRECAO_MAX):
+        return False, {}
+    if df['Close'].iloc[-1] < topo_inicio * 0.95:
+        return False, {}
+    alca = df.iloc[-max_alca_dias:]
+    if len(alca) < 5:
+        return False, {}
+    amplitude_alca = (alca['High'].max() - alca['Low'].min()) / alca['Low'].min()
+    if amplitude_alca > 0.05:
+        return False, {}
+    return True, {'tipo': 'Cup&Handle', 'altura': topo_inicio - fundo, 'resistencia': topo_inicio}
+
+def detectar_diamante(df, min_barras=40):
+    if len(df) < min_barras:
+        return False, {}
+    metade = min_barras // 2
+    primeira = df.iloc[-min_barras:-metade]
+    segunda = df.iloc[-metade:]
+    picos1 = encontrar_picos(primeira['High'], ordem=3, modo='max')
+    vales1 = encontrar_picos(primeira['Low'], ordem=3, modo='min')
+    if len(picos1) < 2 or len(vales1) < 2:
+        return False, {}
+    if not ((picos1[-1][1] > picos1[0][1]) and (vales1[-1][1] < vales1[0][1])):
+        return False, {}
+    picos2 = encontrar_picos(segunda['High'], ordem=3, modo='max')
+    vales2 = encontrar_picos(segunda['Low'], ordem=3, modo='min')
+    if len(picos2) < 2 or len(vales2) < 2:
+        return False, {}
+    if (picos2[-1][1] < picos2[0][1]) and (vales2[-1][1] > vales2[0][1]):
+        altura = max(df['High'].iloc[-min_barras:]) - min(df['Low'].iloc[-min_barras:])
+        return True, {'tipo': 'Diamante', 'altura': altura}
+    return False, {}
+
+def detectar_canal_tendencia(df, min_toques=2, tolerancia_linha=0.02):
+    if len(df) < 30:
+        return False, {}
+    closes = df['Close'].values
+    highs = encontrar_picos(df['High'], modo='max')
+    lows = encontrar_picos(df['Low'], modo='min')
+    if len(highs) < min_toques or len(lows) < min_toques:
+        return False, {}
+    indices = np.arange(len(df))
+    ultimos_fundos = lows[-min_toques:]
+    ultimos_topos = highs[-min_toques:]
+    fundos_asc = all(ultimos_fundos[i][1] < ultimos_fundos[i+1][1] for i in range(len(ultimos_fundos)-1))
+    if fundos_asc:
+        x_f = np.array([p[0] for p in ultimos_fundos])
+        y_f = np.array([p[1] for p in ultimos_fundos])
+        coef = np.polyfit(x_f, y_f, 1)
+        lta_func = lambda idx: coef[0] * idx + coef[1]
+        max_dist = -np.inf
+        topo_ref = None
+        for t in ultimos_topos:
+            dist = t[1] - lta_func(t[0])
+            if dist > max_dist:
+                max_dist = dist
+                topo_ref = t
+        if topo_ref is None:
+            return False, {}
+        intercept_ret = topo_ref[1] - coef[0] * topo_ref[0]
+        lr_func = lambda idx: coef[0] * idx + intercept_ret
+        altura = lr_func(len(df)-1) - lta_func(len(df)-1)
+        if altura <= 0:
+            return False, {}
+        fechamento_atual = closes[-1]
+        rompeu_retorno = fechamento_atual > lr_func(len(df)-1)
+        return True, {
+            'tipo': 'Canal de Alta',
+            'direcao': 'COMPRA',
+            'altura': round(altura, 2),
+            'linha_mestra': round(lta_func(len(df)-1), 2),
+            'linha_retorno': round(lr_func(len(df)-1), 2),
+            'rompeu_retorno': rompeu_retorno
+        }
+    topos_desc = all(ultimos_topos[i][1] > ultimos_topos[i+1][1] for i in range(len(ultimos_topos)-1))
+    if topos_desc:
+        x_t = np.array([p[0] for p in ultimos_topos])
+        y_t = np.array([p[1] for p in ultimos_topos])
+        coef = np.polyfit(x_t, y_t, 1)
+        ltb_func = lambda idx: coef[0] * idx + coef[1]
+        min_dist = np.inf
+        fundo_ref = None
+        for f in ultimos_fundos:
+            dist = f[1] - ltb_func(f[0])
+            if dist < min_dist:
+                min_dist = dist
+                fundo_ref = f
+        if fundo_ref is None:
+            return False, {}
+        intercept_ret = fundo_ref[1] - coef[0] * fundo_ref[0]
+        lr_func = lambda idx: coef[0] * idx + intercept_ret
+        altura = ltb_func(len(df)-1) - lr_func(len(df)-1)
+        if altura <= 0:
+            return False, {}
+        fechamento_atual = closes[-1]
+        rompeu_retorno = fechamento_atual < lr_func(len(df)-1)
+        return True, {
+            'tipo': 'Canal de Baixa',
+            'direcao': 'VENDA',
+            'altura': round(altura, 2),
+            'linha_mestra': round(ltb_func(len(df)-1), 2),
+            'linha_retorno': round(lr_func(len(df)-1), 2),
+            'rompeu_retorno': rompeu_retorno
+        }
+    return False, {}
+
+def detectar_pivo_dow(df, direcao='COMPRA'):
+    if len(df) < 30:
+        return False, {}
+    lows = encontrar_picos(df['Low'], modo='min')[-3:]
+    highs = encontrar_picos(df['High'], modo='max')[-3:]
+    if len(lows) < 2 or len(highs) < 2:
+        return False, {}
+    if direcao == 'COMPRA':
+        if lows[-1][1] > lows[-2][1] and df['Close'].iloc[-1] > highs[-2][1]:
+            return True, {'tipo': 'Pivô de Alta', 'altura': highs[-2][1] - lows[-2][1]}
+    else:
+        if highs[-1][1] < highs[-2][1] and df['Close'].iloc[-1] < lows[-2][1]:
+            return True, {'tipo': 'Pivô de Baixa', 'altura': highs[-2][1] - lows[-2][1]}
+    return False, {}
+
+# ==================== WYCKOFF ====================
+def detectar_range_wyckoff(df, periodo=80, amplitude_max=0.18, vol_contracao=0.55):
+    if len(df) < periodo + 60:
+        return None
+    janela = df.iloc[-periodo:]
+    max_range = janela['High'].max()
+    min_range = janela['Low'].min()
+    if min_range <= 0:
+        return None
+    amplitude = (max_range / min_range) - 1
+    if amplitude > amplitude_max:
+        return None
+    ret = df['Close'].pct_change().dropna()
+    vol_atual = ret.iloc[-periodo:].std()
+    vol_hist = ret.rolling(60).std().iloc[-1]
+    if vol_hist is None or vol_hist == 0:
+        return None
+    if vol_atual >= vol_contracao * vol_hist:
+        return None
+    prev = df.iloc[-(periodo+100):-periodo] if len(df) >= periodo+100 else df.iloc[:-periodo]
+    tend_ant = None
+    if len(prev) >= 50:
+        mm50 = prev['Close'].rolling(50).mean().iloc[-1]
+        mm200 = prev['Close'].rolling(200).mean().iloc[-1] if len(prev) >= 200 else mm50
+        tend_ant = 'ALTA' if mm50 > mm200 else 'BAIXA'
+    return {'topo': round(max_range,2), 'fundo': round(min_range,2),
+            'altura': round(max_range - min_range,2), 'tendencia_anterior': tend_ant}
+
+def _calcular_linha_tendencia(pivos, indices_originais):
+    if len(pivos) < 2:
+        return None
+    x = np.array([p[0] for p in pivos])
+    y = np.array([p[1] for p in pivos])
+    coef = np.polyfit(x, y, 1)
+    return coef[0], coef[1]
+
+def existe_obstaculo_no_caminho(df, entrada, alvo, direcao):
+    if direcao == 'COMPRA':
+        picos = encontrar_picos(df['High'], modo='max')[-12:]
+        for idx, valor in picos:
+            if entrada < valor <= alvo:
+                if df['Close'].iloc[idx] > valor:
+                    continue
+                return True
+        for n_pontos in [3,4]:
+            pivos_ltb = encontrar_picos(df['High'], modo='max')[-n_pontos:]
+            if len(pivos_ltb) >= 3:
+                coef = _calcular_linha_tendencia(pivos_ltb, None)
+                if coef:
+                    a, b = coef
+                    idx_atual = len(df) - 1
+                    ltb_valor = a * idx_atual + b
+                    if entrada < ltb_valor <= alvo:
+                        return True
+        return False
+    else:
+        vales = encontrar_picos(df['Low'], modo='min')[-12:]
+        for idx, valor in vales:
+            if alvo <= valor < entrada:
+                if df['Close'].iloc[idx] < valor:
+                    continue
+                return True
+        for n_pontos in [3,4]:
+            pivos_lta = encontrar_picos(df['Low'], modo='min')[-n_pontos:]
+            if len(pivos_lta) >= 3:
+                coef = _calcular_linha_tendencia(pivos_lta, None)
+                if coef:
+                    a, b = coef
+                    idx_atual = len(df) - 1
+                    lta_valor = a * idx_atual + b
+                    if alvo <= lta_valor < entrada:
+                        return True
+        return False
+
+def projetar_alvo_wyckoff(df, range_info, lado, multiplicador=1.0):
+    altura = range_info['altura']
+    fechamento = df['Close'].iloc[-1]
+    if lado == 'COMPRA':
+        alvo = fechamento + altura * multiplicador
+        stop = range_info['fundo'] * 0.99
+    else:
+        alvo = fechamento - altura * multiplicador
+        stop = range_info['topo'] * 1.01
+    if existe_obstaculo_no_caminho(df, fechamento, alvo, lado):
+        return None
+    ganho = abs(alvo - fechamento) / fechamento * 100
+    return {'entrada': round(fechamento,2), 'stop': round(stop,2), 'alvo': round(alvo,2),
+            'ganho_percentual': round(ganho,1)}
+
+def scanner_wyckoff(data_dict, tickers, min_perna=20, max_perna=40):
+    sinais = []
+    for ticker in tickers:
+        df = data_dict.get(ticker)
+        if df is None or len(df) < 150:
+            continue
+        r = detectar_range_wyckoff(df)
+        if not r:
+            continue
+        fech = df['Close'].iloc[-1]
+        vol_atual = df['Volume'].iloc[-1]
+        vol_medio = df['Volume'].rolling(20).mean().iloc[-1]
+        if vol_atual < 1.5 * vol_medio:
+            continue
+        if fech > r['topo'] and r['tendencia_anterior'] == 'BAIXA':
+            sinal = projetar_alvo_wyckoff(df, r, 'COMPRA')
+        elif fech < r['fundo'] and r['tendencia_anterior'] == 'ALTA':
+            sinal = projetar_alvo_wyckoff(df, r, 'VENDA')
+        else:
+            continue
+        if sinal and min_perna <= sinal['ganho_percentual'] <= max_perna:
+            sinal['Ticker'] = ticker
+            sinal['Direcao'] = 'COMPRA' if fech > r['topo'] else 'VENDA'
+            sinais.append(sinal)
+    return sinais
+
+# ==================== ESTRUTURA DE FUNDO ====================
+def detectar_rompimento_ltb(df, janela=LTB_JANELA):
+    if len(df) < janela:
+        return False, None
+    trecho = df.iloc[-janela:]
+    highs = encontrar_picos(trecho['High'], ordem=5, modo='max')
+    if len(highs) < 2:
+        return False, None
+    p1, p2 = highs[0], highs[-1]
+    if p2[1] >= p1[1]:
+        return False, None
+    slope = (p2[1] - p1[1]) / (p2[0] - p1[0])
+    idx_atual = len(df) - 1
+    ltb_projetada = p1[1] + slope * (idx_atual - (p1[0] + (len(df) - janela)))
+    if df['Close'].iloc[-1] > ltb_projetada:
+        return True, slope
+    return False, None
+
+def detectar_estrutura_fundo(df, rompeu_ltb):
+    if not rompeu_ltb:
+        return False, None
+    ok_oco, info_oco = detectar_oco(df, 'fundo')
+    if ok_oco:
+        return True, info_oco
+    ok_fd, info_fd = detectar_duplo_fundo(df)
+    if ok_fd:
+        return True, info_fd
+    ok_ft, info_ft = detectar_triplo_fundo(df)
+    if ok_ft:
+        return True, info_ft
+    return False, None
+
+# ==================== CONFLUÊNCIA UNIFICADA v16.3 ====================
+def calcular_score_confluencia_v16(df, direcao, entrada, setup_detectado, info_setup,
+                                   volume_atual, media_volume, rsi_atual, rsi_anterior,
+                                   mm20, mm50, mm200, atr, rompeu_ltb=False, estrutura_fundo=False,
+                                   score_setor=0):
+    score = 0
+    camadas = []
+    vetos = []
+    if USAR_DIVERGENCIAS:
+        if detectar_divergencia_contraria_oscilador(df, 'IFR', direcao):
+            vetos.append('Divergência CONTRÁRIA IFR')
+        if detectar_divergencia_contraria_oscilador(df, 'MACD', direcao):
+            vetos.append('Divergência CONTRÁRIA MACD')
+        if vetos:
+            return -1, vetos, []
+    if USAR_GAPS:
+        tipo_gap = classificar_gap(df, atr, media_volume)
+        if tipo_gap == 'Exaustão':
+            return -1, ['Gap de Exaustão'], []
+    if setup_detectado and info_setup.get('tipo'):
+        score += 25
+        camadas.append('padrao_grafico')
+    if preco_em_zona_interesse(df, entrada, direcao):
+        score += 25
+        camadas.append('zona_interesse')
+    if direcao == 'COMPRA':
+        if mm20 > mm50 > mm200 and entrada > mm20:
+            score += 25
+            camadas.append('medias_alinhavadas')
+    else:
+        if mm20 < mm50 < mm200 and entrada < mm20:
+            score += 25
+            camadas.append('medias_alinhavadas')
+    if USAR_MACD_CONFLUENCIA:
+        macd = ta.macd(df['Close'], fast=12, slow=26, signal=9)
+        if macd is not None:
+            linha_macd = macd['MACD_12_26_9'].iloc[-1]
+            linha_sinal = macd['MACDs_12_26_9'].iloc[-1]
+            hist_atual = macd['MACDh_12_26_9'].iloc[-1]
+            hist_ant = macd['MACDh_12_26_9'].iloc[-2] if len(macd) >= 2 else 0
+            if direcao == 'COMPRA' and linha_macd > linha_sinal and hist_atual > hist_ant:
+                score += 20
+                camadas.append('macd_confluencia')
+            elif direcao == 'VENDA' and linha_macd < linha_sinal and hist_atual < hist_ant:
+                score += 20
+                camadas.append('macd_confluencia')
+    z_vol = zscore(df['Volume'], volume_atual, window=20)
+    if direcao == 'COMPRA':
+        if z_vol >= Z_VOLUME_COMPRA:
+            score += 10
+            camadas.append('volume_compra')
+    else:
+        if z_vol >= Z_VOLUME_VENDA:
+            score += 10
+            camadas.append('volume_venda')
+    if USAR_OBV and obv_antecipacao(df, direcao):
+        score += 15
+        camadas.append('obv_antecipacao')
+    if USAR_BOLLINGER and calcular_bollinger_squeeze(df):
+        score += 20
+        camadas.append('bollinger_squeeze')
+    if USAR_GAPS:
+        tipo_gap = classificar_gap(df, atr, media_volume)
+        if tipo_gap == 'Fuga':
+            score += 20
+            camadas.append('gap_fuga')
+    if USAR_DIVERGENCIAS:
+        if detectar_divergencia_oscilador(df, 'IFR', direcao):
+            score += 30
+            camadas.append('divergencia_favor_IFR')
+        elif detectar_divergencia_oscilador(df, 'MACD', direcao):
+            score += 20
+            camadas.append('divergencia_favor_MACD')
+    if info_setup.get('tipo') in ['Diamante', 'OCO Topo', 'OCO Invertido']:
+        score += 15
+        camadas.append('padrao_raro')
+    if direcao == 'VENDA':
+        candle_atual = df.iloc[-1]
+        candle_ant = df.iloc[-2] if len(df) >= 2 else None
+        velas = classificar_candle(candle_atual, candle_ant, 'VENDA')
+        if any(p in velas for p in ['Engolfo de Baixa', 'Kicker de Baixa', 'Estrela Cadente']):
+            score += 15
+            camadas.append('padrao_vela_baixista')
+    candle_atual = df.iloc[-1]
+    candle_ant = df.iloc[-2] if len(df) >= 2 else None
+    if USAR_CLIMAX:
+        cl = detectar_climax(df, media_volume)
+        if cl == 'Clímax de Compra' and direcao == 'VENDA':
+            score += 25
+            camadas.append('climax_venda')
+        elif cl == 'Clímax de Venda' and direcao == 'COMPRA':
+            score += 25
+            camadas.append('climax_compra')
+        elif cl is not None:
+            score -= 15
+            camadas.append('climax_contrario')
+    if USAR_EXTENSAO_PRECO and verificar_extensao_preco(df):
+        score -= 15
+        camadas.append('extensao_perigosa')
+    if USAR_SENSIBILIDADE_CANAL and detectar_sensibilidade_canal(df):
+        score -= 10
+        camadas.append('canal_exausto')
+    if USAR_CRUZAMENTO_MEDIAS and verificar_cruzamento_medias(df, direcao):
+        score += 10
+        camadas.append('cruzamento_medias')
+    if USAR_HARAMI and detectar_harami(candle_atual, candle_ant, direcao):
+        score += 10
+        camadas.append('harami')
+    if USAR_NUVEM_NEGRA and detectar_nuvem_negra(candle_atual, candle_ant):
+        if direcao == 'VENDA':
+            score += 15
+            camadas.append('nuvem_negra')
+        else:
+            score -= 10
+            camadas.append('nuvem_negra_contraria')
+    if USAR_SOLDADOS_CORVOS:
+        if detectar_3_soldados(df):
+            if direcao == 'COMPRA':
+                score += 15
+                camadas.append('3_soldados')
+            else:
+                score -= 10
+        if detectar_3_corvos(df):
+            if direcao == 'VENDA':
+                score += 15
+                camadas.append('3_corvos')
+            else:
+                score -= 10
+    if USAR_CUNHAS:
+        ok, info_cunha = detectar_cunha_ascendente(df)
+        if ok:
+            score += 10
+            camadas.append('cunha_ascendente')
+        ok, info_cunha = detectar_cunha_descendente(df)
+        if ok:
+            score += 10
+            camadas.append('cunha_descendente')
+    if USAR_ALARGAMENTOS:
+        ok, _ = detectar_alargamento(df)
+        if ok:
+            score += 5
+            camadas.append('alargamento')
+    if USAR_TOPO_FUNDO_ARREDONDADO:
+        ok, info_arr = detectar_topo_fundo_arredondado(df)
+        if ok:
+            score += 20
+            camadas.append(info_arr['tipo'])
+    if direcao == 'COMPRA' and rsi_atual > IFR_MAX_COMPRA:
+        score -= 20
+        camadas.append('ifr_sobrecompra')
+    elif direcao == 'VENDA' and rsi_atual < IFR_MIN_VENDA:
+        score -= 20
+        camadas.append('ifr_sobrevenda')
+    niveis_para_verificar = []
+    if info_setup:
+        if 'resistencia' in info_setup:
+            niveis_para_verificar.append(info_setup['resistencia'])
+        if 'suporte' in info_setup:
+            niveis_para_verificar.append(info_setup['suporte'])
+        if 'neckline' in info_setup:
+            niveis_para_verificar.append(info_setup['neckline'])
+        if 'linha_mestra' in info_setup:
+            niveis_para_verificar.append(info_setup['linha_mestra'])
+        if 'linha_retorno' in info_setup:
+            niveis_para_verificar.append(info_setup['linha_retorno'])
+    penalidade_toques_total = 0
+    for nivel in niveis_para_verificar:
+        toques, penal = contar_toques_nivel(df, nivel, tolerancia=0.02)
+        if toques > MAX_TOQUES_NIVEL:
+            camadas.append(f'zona_testada_{toques}x')
+            penalidade_toques_total += penal
+    if penalidade_toques_total > 0:
+        score -= penalidade_toques_total
+    # --- AJUSTE MACRO ---
+    if USAR_FILTRO_MACRO_LTB and rompeu_ltb:
+        if direcao == 'VENDA':
+            score -= 30
+            camadas.append('penalidade_macro_ltb')
+            if estrutura_fundo:
+                score -= 15
+                camadas.append('penalidade_estrutura_fundo')
+        elif direcao == 'COMPRA':
+            score += 20
+            camadas.append('bonus_macro_ltb')
+            if estrutura_fundo:
+                score += 15
+                camadas.append('bonus_estrutura_fundo')
+    # --- BÔNUS SETORIAL (NOVO) ---
+    if USAR_SCORE_SETORIAL:
+        score += int(score_setor * 0.15)
+        camadas.append(f'score_setor_{score_setor}')
+    return score, vetos, camadas
+
+# ==================== STOP / ALVO / PAYOFF ====================
+def calcular_stop_por_padrao(df, entrada, direcao, setup_nome, info_setup, atr):
+    if direcao == 'COMPRA':
+        if setup_nome in ['Triângulo Simétrico', 'Triângulo Ascendente']:
+            ultimo_fundo = info_setup.get('fundos', [None])[-1] if 'fundos' in info_setup else None
+            return ultimo_fundo - atr if ultimo_fundo else entrada - 1.8*atr
+        elif setup_nome == 'Retângulo':
+            return info_setup.get('suporte', entrada - 1.8*atr) - atr
+        elif setup_nome in ['OCO Invertido', 'Fundo Duplo', 'Fundo Triplo']:
+            return info_setup.get('fundo', info_setup.get('cabeca', 0)) - atr
+        elif setup_nome in ['Bandeira', 'Flâmula']:
+            return df['Low'].iloc[-min(20, len(df)):].min() - atr
+        elif setup_nome == 'Cup&Handle':
+            return info_setup.get('resistencia', entrada) * 0.97
+        elif setup_nome in ['Canal de Alta', 'Pivô de Alta']:
+            return df['Low'].iloc[-min(10, len(df)):].min() - atr
+        else:
+            return entrada - 1.8 * atr
+    else:
+        if setup_nome in ['Triângulo Descendente', 'Triângulo Simétrico']:
+            ultimo_topo = info_setup.get('topos', [None])[-1] if 'topos' in info_setup else None
+            return ultimo_topo + atr if ultimo_topo else entrada + 1.8*atr
+        elif setup_nome == 'Retângulo':
+            return info_setup.get('resistencia', entrada + 1.8*atr) + atr
+        elif setup_nome in ['OCO Topo', 'Topo Duplo', 'Topo Triplo']:
+            return info_setup.get('topo', info_setup.get('cabeca', 0)) + atr
+        elif setup_nome in ['Bandeira', 'Flâmula']:
+            return df['High'].iloc[-min(20, len(df)):].max() + atr
+        elif setup_nome in ['Canal de Baixa', 'Pivô de Baixa']:
+            return df['High'].iloc[-min(10, len(df)):].max() + atr
+        else:
+            return entrada + 1.8 * atr
+
+def calcular_alvo_por_padrao(entrada, direcao, setup_nome, info_setup):
+    altura = info_setup.get('altura', info_setup.get('mastro', 0))
+    if altura <= 0:
+        return None
+    return entrada + altura if direcao == 'COMPRA' else entrada - altura
+
+def calcular_payoff(entrada, alvo, stop, direcao, custos=0.003):
+    risco = abs(entrada - stop)
+    retorno = abs(alvo - entrada)
+    if risco <= 0:
+        return 0.0
+    return round(retorno / risco - custos / risco, 2)
+
+# ==================== ANÁLISE PRINCIPAL v16.3 ====================
+def analisar_timeframe_v16(data_dict, nome_tf, tickers_liquidos, tendencia_superior=None,
+                           fund_data_dict=None, score_setorial_dict=None):
+    oportunidades, status, contagem_setores = [], [], {}
+    for ticker in tickers_liquidos:
+        df_raw = data_dict.get(ticker)
+        if df_raw is None or df_raw.empty:
+            status.append({'Ticker': ticker, 'Timeframe': nome_tf, 'Status': '❌ Recusado', 'Motivo': 'Sem dados'})
+            continue
+        df = df_raw.copy()
+        df.index = pd.to_datetime(df.index)
+        df.sort_index(inplace=True)
+        if len(df) < 50:
+            status.append({'Ticker': ticker, 'Timeframe': nome_tf, 'Status': '❌ Recusado', 'Motivo': 'Poucos dados'})
+            continue
+        # --- FILTRO FUNDAMENTAL ---
+        if USAR_FILTRO_FUNDAMENTAL and fund_data_dict:
+            fund_data = fund_data_dict.get(ticker)
+            aprovado, motivo, metricas = aplicar_checklist_fundamental(fund_data, ticker)
+            if not aprovado:
+                status.append({
+                    'Ticker': ticker,
+                    'Timeframe': nome_tf,
+                    'Status': '❌ Recusado',
+                    'Motivo': f'Fundamental: {motivo}',
+                    'ROE': metricas.get('ROE'),
+                    'Dívida/EBITDA': metricas.get('Dívida/EBITDA'),
+                    'FCF': metricas.get('FCF')
+                })
+                continue
+        else:
+            metricas = {}
+        entrada = df['Close'].iloc[-1]
+        if entrada < PRECO_MINIMO:
+            status.append({'Ticker': ticker, 'Timeframe': nome_tf, 'Status': '❌ Recusado', 'Motivo': f'Preço R$ {entrada:.2f} < {PRECO_MINIMO}'})
+            continue
+        atr = calcular_atr(df) or entrada * 0.02
+        mm20, mm50 = df['Close'].rolling(20).mean().iloc[-1], df['Close'].rolling(50).mean().iloc[-1]
+        mm200 = df['Close'].rolling(200).mean().iloc[-1] if len(df) >= 200 else mm50
+        rsi_series = ta.rsi(df['Close'], length=14)
+        rsi_atual = rsi_series.iloc[-1] if rsi_series is not None and len(rsi_series) > 0 else 50
+        rsi_anterior = rsi_series.iloc[-2] if len(rsi_series) > 1 else rsi_atual
+        media_volume, volume_atual = df['Volume'].rolling(20).mean().iloc[-1], df['Volume'].iloc[-1]
+        rompeu_ltb, _ = detectar_rompimento_ltb(df) if USAR_FILTRO_MACRO_LTB else (False, None)
+        estrutura_fundo, info_fundo = detectar_estrutura_fundo(df, rompeu_ltb) if USAR_ESTRUTURA_FUNDO else (False, None)
+        score_setor = score_setorial_dict.get(ticker, 0) if score_setorial_dict else 0
+        candidatos = []
+        melhor_quase = None
+        padroes_compra = [
+            (detectar_triangulo_ascendente, 'Triângulo Ascendente'),
+            (detectar_triangulo_simetrico, 'Triângulo Simétrico'),
+            (detectar_retangulo, 'Retângulo'),
+            (detectar_duplo_fundo, 'Fundo Duplo'),
+            (detectar_triplo_fundo, 'Fundo Triplo'),
+            (lambda x: detectar_oco(x, 'fundo'), 'OCO Invertido'),
+            (detectar_bandeira, 'Bandeira'),
+            (detectar_flamula, 'Flâmula'),
+            (detectar_cup_handle, 'Cup&Handle'),
+            (detectar_diamante, 'Diamante'),
+            (detectar_canal_tendencia, 'Canal de Alta'),
+            (detectar_pivo_dow, 'Pivô de Alta'),
+        ]
+        if USAR_CUNHAS:
+            padroes_compra.append((detectar_cunha_descendente, 'Cunha Descendente'))
+        if USAR_TOPO_FUNDO_ARREDONDADO:
+            def fundo_arredondado_compra(df):
+                ok, info = detectar_topo_fundo_arredondado(df)
+                if ok and info.get('tipo') == 'Fundo Arredondado (Pires)':
+                    return True, info
+                return False, {}
+            padroes_compra.append((fundo_arredondado_compra, 'Fundo Arredondado (Pires)'))
+        for func, nome in padroes_compra:
+            ok, info = func(df)
+            if ok:
+                if nome == 'Triângulo Simétrico' and df['Close'].pct_change(20).iloc[-1] <= 0:
+                    continue
+                if nome == 'Diamante' and df['Close'].iloc[-1] <= df['Close'].iloc[-5]:
+                    continue
+                candidatos.append((nome, info, 'COMPRA'))
+        padroes_venda = [
+            (detectar_triangulo_descendente, 'Triângulo Descendente'),
+            (detectar_triangulo_simetrico, 'Triângulo Simétrico'),
+            (detectar_retangulo, 'Retângulo'),
+            (detectar_duplo_topo, 'Topo Duplo'),
+            (detectar_triplo_topo, 'Topo Triplo'),
+            (lambda x: detectar_oco(x, 'topo'), 'OCO Topo'),
+            (detectar_bandeira, 'Bandeira'),
+            (detectar_flamula, 'Flâmula'),
+            (detectar_diamante, 'Diamante'),
+            (detectar_canal_tendencia, 'Canal de Baixa'),
+            (detectar_pivo_dow, 'Pivô de Baixa'),
+        ]
+        if USAR_CUNHAS:
+            padroes_venda.append((detectar_cunha_ascendente, 'Cunha Ascendente'))
+        if USAR_TOPO_FUNDO_ARREDONDADO:
+            def topo_arredondado_venda(df):
+                ok, info = detectar_topo_fundo_arredondado(df)
+                if ok and info.get('tipo') == 'Topo Arredondado (Abóbada)':
+                    return True, info
+                return False, {}
+            padroes_venda.append((topo_arredondado_venda, 'Topo Arredondado (Abóbada)'))
+        for func, nome in padroes_venda:
+            ok, info = func(df)
+            if ok:
+                if nome == 'Triângulo Simétrico' and df['Close'].pct_change(20).iloc[-1] >= 0:
+                    continue
+                if nome == 'Diamante' and df['Close'].iloc[-1] >= df['Close'].iloc[-5]:
+                    continue
+                if nome == 'Canal de Baixa' and info.get('direcao') != 'VENDA':
+                    continue
+                candidatos.append((nome, info, 'VENDA'))
+        if not candidatos:
+            status.append({'Ticker': ticker, 'Timeframe': nome_tf, 'Status': '❌ Recusado', 'Motivo': 'Nenhum padrão detectado'})
+            continue
+        melhor_op, melhor_score, motivos_recusa_local = None, -1, []
+        for nome, info, direc in candidatos:
+            candle_atual = df.iloc[-1]
+            candle_ant = df.iloc[-2] if len(df) >= 2 else None
+            if nome.startswith('Canal'):
+                if not info.get('rompeu_retorno'):
+                    motivos_recusa_local.append(f'{nome} aguardando rompimento da linha de retorno')
+                    continue
+            ok_candle, msg_candle = validar_candle_forca_v2(df, direc)
+            if not ok_candle and MODO_PULLBACK:
+                linha = info.get('resistencia') or info.get('topo') if direc == 'COMPRA' else info.get('suporte') or info.get('fundo')
+                if linha:
+                    houve_pb, candle_pb = verificar_pullback(df, linha, direc, media_volume)
+                    if houve_pb:
+                        corpo = abs(candle_pb['Close'] - candle_pb['Open'])
+                        rng = candle_pb['High'] - candle_pb['Low']
+                        if rng > 0 and corpo / rng >= 0.35:
+                            fech_rel = (candle_pb['Close'] - candle_pb['Low']) / rng if direc == 'COMPRA' else (candle_pb['High'] - candle_pb['Close']) / rng
+                            if fech_rel >= 0.60:
+                                ok_candle = True
+                                msg_candle = "OK (pullback flexibilizado)"
+            if not ok_candle:
+                row_atual = df.iloc[-1]
+                row_ant = df.iloc[-2] if len(df) >= 2 else None
+                padrao_rejeicao = False
+                if direc == 'COMPRA' and (detectar_martelo(row_atual, 'COMPRA') or (row_ant is not None and detectar_engolfo_compra(row_atual, row_ant))):
+                    padrao_rejeicao = True
+                elif direc == 'VENDA' and (detectar_estrela_cadente(row_atual) or (row_ant is not None and detectar_engolfo_baixa(row_atual, row_ant))):
+                    padrao_rejeicao = True
+                tocou_zona = False
+                niveis_setup = []
+                if info:
+                    for chave in ['suporte', 'resistencia', 'fundo', 'topo', 'neckline']:
+                        if chave in info:
+                            niveis_setup.append(info[chave])
+                for nivel in niveis_setup:
+                    if candle_tocou_zona(df, direc, nivel):
+                        tocou_zona = True
+                        break
+                if padrao_rejeicao and tocou_zona and volume_atual >= media_volume * 0.7:
+                    ok_candle = True
+                    msg_candle = "OK (rejeição por sombra na zona)"
+            if not ok_candle:
+                vol_ok = volume_atual >= (media_volume * VOLUME_MULT_MEDIO_COMPRA if direc == 'COMPRA' else media_volume * VOLUME_MULT_VENDA)
+                zona_ok = preco_em_zona_interesse(df, entrada, direc)
+                if vol_ok and zona_ok:
+                    motivos_recusa_local.append(f'{nome} candle: {msg_candle} (setup forte, aguardar confirmação)')
+                    z = -999
+                    if 'Z-Score' in msg_candle:
+                        try:
+                            z = float(msg_candle.split('Z-Score')[1].split()[0])
+                        except:
+                            pass
+                    fech_rel = None
+                    rng = candle_atual['High'] - candle_atual['Low']
+                    if rng > 0:
+                        if direc == 'COMPRA':
+                            fech_rel = (candle_atual['Close'] - candle_atual['Low']) / rng
+                        else:
+                            fech_rel = (candle_atual['High'] - candle_atual['Close']) / rng
+                    linha_ret = info.get('linha_retorno', None)
+                    if linha_ret is not None and linha_ret != 0:
+                        dist_canal_pct = round((df['Close'].iloc[-1] - linha_ret) / linha_ret * 100, 2)
+                    else:
+                        dist_canal_pct = None
+                    candidato_quase = {
+                        'nome': nome,
+                        'direc': direc,
+                        'z': z,
+                        'linha_retorno': linha_ret,
+                        'fechamento': df['Close'].iloc[-1],
+                        'dist_canal_pct': dist_canal_pct,
+                        'fechamento_rel': fech_rel
+                    }
+                    if melhor_quase is None or z > melhor_quase['z']:
+                        melhor_quase = candidato_quase
+                else:
+                    motivos_recusa_local.append(f'{nome} candle: {msg_candle}')
+                continue
+            vol_necessario = media_volume * VOLUME_MULT_MEDIO_COMPRA if direc == 'COMPRA' else media_volume * VOLUME_MULT_VENDA
+            if volume_atual < vol_necessario:
+                motivos_recusa_local.append(f'{nome} volume')
+                continue
+            entrada_real = entrada
+            if MODO_PULLBACK:
+                linha = info.get('resistencia') or info.get('topo') if direc == 'COMPRA' else info.get('suporte') or info.get('fundo')
+                if linha:
+                    houve_pb, candle_pb = verificar_pullback(df, linha, direc, media_volume)
+                    if houve_pb:
+                        entrada_real = candle_pb['Close']
+            stop = calcular_stop_por_padrao(df, entrada_real, direc, nome, info, atr)
+            alvo_padrao = calcular_alvo_por_padrao(entrada_real, direc, nome, info)
+            if alvo_padrao is None:
+                alvo_padrao = entrada_real + 3 * abs(entrada_real - stop) if direc == 'COMPRA' else entrada_real - 3 * abs(entrada_real - stop)
+            fib_vals = calcular_expansao_fibonacci(df, direc)
+            fib_161 = fib_vals['161.8%'] if fib_vals else None
+            alvo_final = min(alvo_padrao, fib_161) if fib_161 else alvo_padrao
+            payoff = calcular_payoff(entrada_real, alvo_final, stop, direc)
+            if payoff < PAYOFF_MINIMO:
+                motivos_recusa_local.append(f'{nome} payoff {payoff:.1f}')
+                continue
+            risco_percent = abs(entrada_real - stop) / entrada_real
+            if not (RISCO_PERCENTUAL_MINIMO <= risco_percent <= RISCO_PERCENTUAL_MAXIMO):
+                motivos_recusa_local.append(f'{nome} risco {risco_percent*100:.0f}%')
+                continue
+            if tendencia_superior and ticker in tendencia_superior:
+                tend_sup = tendencia_superior[ticker]
+                if (direc == 'COMPRA' and tend_sup == 'BAIXA') or (direc == 'VENDA' and tend_sup == 'ALTA'):
+                    motivos_recusa_local.append(f'{nome} tendência superior')
+                    continue
+            score, vetos, camadas = calcular_score_confluencia_v16(
+                df, direc, entrada_real, True, info,
+                volume_atual, media_volume, rsi_atual, rsi_anterior,
+                mm20, mm50, mm200, atr, rompeu_ltb, estrutura_fundo,
+                score_setor
+            )
+            if vetos:
+                motivos_recusa_local.append(f'{nome} veto: {vetos}')
+                continue
+            if score < PONTUACAO_MINIMA_CONFLUENCIA:
+                motivos_recusa_local.append(f'{nome} score {score}')
+                continue
+            if len(camadas) < MIN_SINAIS_CONFLUENCIA:
+                motivos_recusa_local.append(f'{nome} apenas {len(camadas)} sinais de confluência')
+                continue
+            if score > melhor_score:
+                melhor_score = score
+                melhor_op = {
+                    'nome': nome, 'info': info, 'direc': direc,
+                    'entrada': entrada_real, 'stop': stop, 'alvo': alvo_final,
+                    'alvo_est': fib_vals['261.8%'] if fib_vals else None,
+                    'payoff': payoff, 'score': score, 'camadas': camadas,
+                    'score_setor': score_setor,
+                    'metricas_fund': metricas
+                }
+        if melhor_op is None:
+            motivos_str = '; '.join(list(set(motivos_recusa_local))[:3]) if motivos_recusa_local else 'Nenhum padrão passou'
+            status_entry = {'Ticker': ticker, 'Timeframe': nome_tf, 'Status': '❌ Recusado', 'Motivo': motivos_str}
+            if melhor_quase is not None:
+                status_entry['z_candle'] = melhor_quase['z']
+                status_entry['direcao_watch'] = melhor_quase['direc']
+                status_entry['padrao_watch'] = melhor_quase['nome']
+                status_entry['linha_retorno'] = melhor_quase['linha_retorno']
+                status_entry['fechamento'] = melhor_quase['fechamento']
+                status_entry['dist_canal_pct'] = melhor_quase['dist_canal_pct']
+                status_entry['fechamento_rel'] = melhor_quase['fechamento_rel']
+            status.append(status_entry)
+            continue
+        setor = ticker.split('.')[0][:4]
+        contagem_setores[setor] = contagem_setores.get(setor, 0) + 1
+        if contagem_setores[setor] > MAX_ATIVOS_POR_SETOR:
+            status.append({'Ticker': ticker, 'Timeframe': nome_tf, 'Status': '❌ Recusado', 'Motivo': f'Limite setor {setor}'})
+            continue
+        op = melhor_op
+        oportunidades.append({
+            'Ticker': ticker, 'Timeframe': nome_tf, 'Setup': op['nome'], 'Direcao': op['direc'],
+            'Entrada': round(op['entrada'], 2), 'Stop Loss': round(op['stop'], 2), 'Alvo': round(op['alvo'], 2),
+            'Alvo_Estendido': op['alvo_est'], 'Payoff': op['payoff'], 'Score': op['score'],
+            'Score_Setorial': op['score_setor'],
+            'ROE': op['metricas_fund'].get('ROE', np.nan),
+            'Dívida/EBITDA': op['metricas_fund'].get('Dívida/EBITDA', np.nan),
+            'FCF': op['metricas_fund'].get('FCF', np.nan),
+            'Confluencia': {'sinais': len(op['camadas']), 'detalhes': op['camadas'], 'camadas': op['camadas']},
+            'Instrucao': f"[{nome_tf}] {op['nome']} – {op['direc']} em R$ {op['entrada']:.2f}, stop R$ {op['stop']:.2f}, alvo R$ {op['alvo']:.2f}. Payoff {op['payoff']:.2f}:1"
+        })
+        status.append({'Ticker': ticker, 'Timeframe': nome_tf, 'Status': '✅ APROVADO', 'Motivo': f'Score {op["score"]}'})
+    return oportunidades, status, len(tickers_liquidos)
+
+# ==================== RASTREADOR DE HISTÓRICO ====================
+def atualizar_historico_oportunidades(ops_hoje, data_dict, arquivo="historico_gebra.json"):
+    hoje = datetime.now().strftime("%Y-%m-%d")
+    try:
+        with open(arquivo, "r") as f:
+            hist = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        hist = {"pendentes": [], "encerradas": []}
+    for op in hist["pendentes"][:]:
+        ticker = op["Ticker"]
+        df = data_dict.get(ticker)
+        if df is None or len(df) < 2:
+            continue
+        alvo = op["Alvo"]
+        stop = op["Stop Loss"]
+        direcao = op["Direcao"]
+        max_hoje = df["High"].iloc[-1]
+        min_hoje = df["Low"].iloc[-1]
+        if direcao == "COMPRA":
+            if max_hoje >= alvo:
+                op["resultado"] = "alvo"
+                op["data_saida"] = hoje
+            elif min_hoje <= stop:
+                op["resultado"] = "stop"
+                op["data_saida"] = hoje
+            else:
+                continue
+        else:
+            if min_hoje <= alvo:
+                op["resultado"] = "alvo"
+                op["data_saida"] = hoje
+            elif max_hoje >= stop:
+                op["resultado"] = "stop"
+                op["data_saida"] = hoje
+            else:
+                continue
+        hist["encerradas"].append(op)
+        hist["pendentes"].remove(op)
+    tickers_pendentes = {op["Ticker"] for op in hist["pendentes"]}
+    for op in ops_hoje:
+        if op["Ticker"] not in tickers_pendentes:
+            hist["pendentes"].append({
+                "Ticker": op["Ticker"],
+                "Direcao": op["Direcao"],
+                "Entrada": op["Entrada"],
+                "Stop Loss": op["Stop Loss"],
+                "Alvo": op["Alvo"],
+                "data_entrada": hoje,
+                "Score": op["Score"],
+                "Setup": op["Setup"]
+            })
+    with open(arquivo, "w") as f:
+        json.dump(hist, f, indent=2)
+    encerradas = hist["encerradas"]
+    total = len(encerradas)
+    acertos = sum(1 for op in encerradas if op.get("resultado") == "alvo")
+    win_rate = round(acertos / total * 100, 1) if total > 0 else 0
+    return win_rate, total, acertos, hist
+
+def calcular_expectativa(arquivo="historico_gebra.json"):
+    try:
+        with open(arquivo, "r") as f:
+            hist = json.load(f)
+    except:
+        return None
+    encerradas = hist.get("encerradas", [])
+    if not encerradas:
+        return None
+    ganhos = []
+    perdas = []
+    for op in encerradas:
+        if op["resultado"] == "alvo":
+            lucro = abs(op["Alvo"] - op["Entrada"])
+            ganhos.append(lucro)
+        elif op["resultado"] == "stop":
+            perda = abs(op["Stop Loss"] - op["Entrada"])
+            perdas.append(perda)
+    win_rate = len(ganhos) / len(encerradas)
+    gm = np.mean(ganhos) if ganhos else 0
+    pm = np.mean(perdas) if perdas else 0
+    expectativa = win_rate * gm - (1 - win_rate) * pm
+    return {
+        "win_rate": win_rate,
+        "ganho_medio": gm,
+        "perda_media": pm,
+        "expectativa": expectativa,
+        "expectativa_R": expectativa / pm if pm > 0 else None,
+        "trades_encerrados": len(encerradas)
+    }
+
+def alerta_correlacao(ops, data_dict):
+    tickers = [op["Ticker"] for op in ops if op["Ticker"] in data_dict]
+    if len(tickers) < 2:
+        return None
+    closes = pd.DataFrame({t: data_dict[t]["Close"] for t in tickers})
+    corr = closes.pct_change().dropna().corr()
+    mask = np.triu(np.ones(corr.shape), k=1).astype(bool)
+    valores = corr.where(mask).stack()
+    return valores.mean()
+
+# ==================== FUNÇÕES DE RELATÓRIO ====================
+def calcular_nh_nl(data_dict):
+    novas_max, novas_min, total = 0, 0, 0
+    for ticker, df in data_dict.items():
+        if df is None or len(df) < 52:
+            continue
+        try:
+            max_52 = df['High'].rolling(52).max().iloc[-1]
+            min_52 = df['Low'].rolling(52).min().iloc[-1]
+            close = df['Close'].iloc[-1]
+            if pd.notna(max_52) and pd.notna(min_52):
+                total += 1
+                if close >= max_52 * 0.995:
+                    novas_max += 1
+                if close <= min_52 * 1.005:
+                    novas_min += 1
+        except:
+            pass
+    saldo = novas_max - novas_min
+    pct_max = round(novas_max/total*100,1) if total>0 else 0
+    pct_min = round(novas_min/total*100,1) if total>0 else 0
+    if saldo > 20:
+        diag = "🟢 FORTE (Tendência de alta consistente)"
+    elif saldo > 0:
+        diag = "🟡 NEUTRO/POSITIVO (Alta moderada)"
+    elif saldo > -20:
+        diag = "🟠 NEUTRO/NEGATIVO (Baixa moderada)"
+    else:
+        diag = "🔴 FRACO (Tendência de baixa acentuada)"
+    return {'saldo': saldo, 'max': novas_max, 'min': novas_min, 'total': total,
+            'pct_max': pct_max, 'pct_min': pct_min, 'diagnostico': diag}
+
+def percentual_acima_media_200(data_dict):
+    acima, total = 0, 0
+    for ticker, df in data_dict.items():
+        if df is None or len(df) < 200:
+            continue
+        mm200 = df['Close'].rolling(200).mean().iloc[-1]
+        if pd.notna(mm200) and df['Close'].iloc[-1] > mm200:
+            acima += 1
+        total += 1
+    return round(acima/total*100,1) if total>0 else 0
+
+def gerar_relatorio_detalhado(ops, todos_status, data_dict, nome_tf="Diário", sinais_wyckoff=None,
+                              win_rate=0.0, total_trades=0, acertos=0, fund_data=None, macro=None):
+    nhnl = calcular_nh_nl(data_dict)
+    pct_acima_200 = percentual_acima_media_200(data_dict)
+    recusados = [s for s in todos_status if 'Recusado' in s.get('Status', '')]
+    motivos = Counter([s.get('Motivo', 'Desconhecido') for s in recusados])
+    top_motivos = motivos.most_common(10)
+    watchlist_items = []
+    for s in recusados:
+        if 'setup forte' not in s.get('Motivo', ''):
+            continue
+        if 'z_candle' not in s and 'fechamento' not in s:
+            continue
+        ticker = s['Ticker']
+        tf = s.get('Timeframe', '?')
+        direcao = s.get('direcao_watch', '?')
+        padrao = s.get('padrao_watch', '?')
+        z = s['z_candle']
+        linha_ret = s.get('linha_retorno')
+        fech = s.get('fechamento')
+        dist_pct = s.get('dist_canal_pct')
+        link = f"https://statusinvest.com.br/acoes/{ticker.replace('.SA','')}"
+        if z is not None:
+            linha = f"{ticker} ({tf}) – {direcao} – {padrao} – Z‑Score={z:.1f}"
+        else:
+            fech_rel = s.get('fechamento_rel', None)
+            if fech_rel is not None:
+                linha = f"{ticker} ({tf}) – {direcao} – {padrao} – Fechamento a {fech_rel:.0%}"
+            else:
+                linha = f"{ticker} ({tf}) – {direcao} – {padrao}"
+        if linha_ret is not None and dist_pct is not None:
+            linha += f" | Dist. canal: {dist_pct:.1f}%"
+        linha += f" → {link}"
+        watchlist_items.append((linha, z if z is not None else -999))
+    watchlist_items.sort(key=lambda x: x[1], reverse=True)
+    watchlist = [item[0] for item in watchlist_items[:15]]
+    linhas = []
+    linhas.append("=" * 90)
+    linhas.append(f"   📊 RELATÓRIO GEBRA v16.3 – ARQUITETURA HÍBRIDA (TÉCNICA + FUNDAMENTOS + MACRO)")
+    linhas.append(f"   {datetime.now().strftime('%d/%m/%Y %H:%M')} | Timeframe principal: {nome_tf}")
+    if macro:
+        linhas.append(f"   📈 Indicadores Macro: Selic={macro.get('SELIC',0):.2f}% | IPCA={macro.get('IPCA',0):.2f}% | PIB={macro.get('PIB',0):.1f}% | Dólar=R$ {macro.get('DOLAR',0):.2f}")
+    linhas.append("=" * 90)
+    linhas.append("")
+    linhas.append("## 🧭 1. CONDIÇÃO DE MERCADO")
+    linhas.append(f"   • Ativos acima da MME200: {pct_acima_200}%")
+    linhas.append(f"   • NH‑NL (52 semanas): saldo {nhnl['saldo']} (Máx: {nhnl['max']} / Mín: {nhnl['min']} / Total: {nhnl['total']})")
+    linhas.append(f"   • Diagnóstico NH‑NL: {nhnl['diagnostico']}")
+    linhas.append(f"   • Taxa de acerto histórica (encerrados): {win_rate}% ({acertos}/{total_trades} trades)")
+    exp = calcular_expectativa()
+    if exp and exp.get("trades_encerrados", 0) > 0:
+        linhas.append(f"   • Expectativa por trade: R$ {exp['expectativa']:.2f} ({exp['expectativa_R']:.1f}R)")
+    corr = alerta_correlacao(ops, data_dict) if ops else None
+    if corr is not None:
+        linhas.append(f"   • Correlação média entre as oportunidades: {corr:.3f}")
+    if nhnl['saldo'] < -15:
+        linhas.append("   ➜ Mercado em tendência de BAIXA (NH‑NL muito negativo)")
+    elif nhnl['saldo'] > 15:
+        linhas.append("   ➜ Mercado em tendência de ALTA (NH‑NL muito positivo)")
+    else:
+        if pct_acima_200 > 60:
+            linhas.append("   ➜ Mercado em tendência de ALTA (maioria dos ativos acima da MME200)")
+        elif pct_acima_200 < 40:
+            linhas.append("   ➜ Mercado em tendência de BAIXA (maioria abaixo da MME200)")
+        else:
+            linhas.append("   ➜ Mercado lateral / indefinido")
+    linhas.append("")
+    linhas.append("## ✅ OPORTUNIDADES CONFIRMADAS")
+    if ops:
+        for i, op in enumerate(ops[:MAX_SETUPS_POR_DIA], 1):
+            ticker_clean = op['Ticker'].replace('.SA','')
+            linhas.append(f"   {i}. [{op['Timeframe']}] {op['Ticker']} | {op['Setup']} | {op['Direcao']} → https://statusinvest.com.br/acoes/{ticker_clean}")
+            linhas.append(f"      Entrada: R$ {op['Entrada']:.2f} | Stop: R$ {op['Stop Loss']:.2f} | Alvo: R$ {op['Alvo']:.2f}")
+            linhas.append(f"      Payoff: {op['Payoff']:.2f} | Score: {op['Score']} | Score Setorial: {op.get('Score_Setorial',0)}")
+            linhas.append(f"      ROE: {op.get('ROE', np.nan):.1%}" if pd.notna(op.get('ROE')) else "      ROE: N/A")
+            linhas.append(f"      Dívida/EBITDA: {op.get('Dívida/EBITDA', np.nan):.1f}x" if pd.notna(op.get('Dívida/EBITDA')) else "      Dívida/EBITDA: N/A")
+            linhas.append(f"      FCF: R$ {op.get('FCF', 0):,.0f}" if pd.notna(op.get('FCF')) else "      FCF: N/A")
+            linhas.append(f"      Sinais: {len(op['Confluencia']['camadas'])} | Camadas: {', '.join(op['Confluencia']['camadas'])}")
+            if op.get('Alvo_Estendido'):
+                linhas.append(f"      Alvo estendido (261.8%): R$ {op['Alvo_Estendido']:.2f}")
+            linhas.append("")
+    else:
+        linhas.append("   ❌ Nenhuma oportunidade com confluência total foi encontrada.")
+        linhas.append("")
+    if sinais_wyckoff:
+        linhas.append("## 🦅 WYCKOFF – ROMPIMENTO DE RANGE COM CAUSA E EFEITO")
+        for i, s in enumerate(sinais_wyckoff[:10], 1):
+            ticker_clean = s['Ticker'].replace('.SA','')
+            linhas.append(f"   {i}. {s['Ticker']} | {s['Direcao']} → https://statusinvest.com.br/acoes/{ticker_clean}")
+            linhas.append(f"      Entrada: R$ {s['entrada']:.2f} | Stop: R$ {s['stop']:.2f} | Alvo: R$ {s['alvo']:.2f} | Perna: {s['ganho_percentual']:.1f}%")
+            linhas.append("")
+    else:
+        linhas.append("## 🦅 WYCKOFF – ROMPIMENTO DE RANGE COM CAUSA E EFEITO")
+        linhas.append("   Nenhum sinal Wyckoff com caminho limpo no momento.")
+        linhas.append("")
+    linhas.append("## 🔍 3. PRINCIPAIS MOTIVOS DE RECUSA")
+    if top_motivos:
+        for motivo, qtd in top_motivos:
+            linhas.append(f"   • {motivo}: {qtd} ocorrências")
+    else:
+        linhas.append("   Nenhum ativo recusado (todos aprovados ou sem dados).")
+    linhas.append("")
+    linhas.append("## 👀 4. WATCHLIST (SETUPS FORTES AGUARDANDO CONFIRMAÇÃO)")
+    if watchlist:
+        for i, item in enumerate(watchlist, 1):
+            linhas.append(f"   {i}. {item}")
+    else:
+        linhas.append("   Nenhum setup forte aguardando confirmação no momento.")
+    linhas.append("")
+    linhas.append("## 💡 5. RECOMENDAÇÃO DO ARQUITETO")
+    if nhnl['saldo'] > 10 and pct_acima_200 > 55:
+        linhas.append("   ✅ Ambiente favorável para operações compradas. Busque rompimentos de resistência com volume e estruturas de fundo.")
+    elif nhnl['saldo'] < -10 and pct_acima_200 < 45:
+        linhas.append("   ⚠️ Tendência de baixa. Priorize operações vendidas ou mantenha-se em caixa.")
+    else:
+        linhas.append("   🟡 Mercado sem direção clara. Aguarde confirmação de tendência ou opere apenas setups de alta confluência (mínimo 4 sinais).")
+    linhas.append("   🔬 Filtro macro ativo: vendas contra rompimento de LTB são penalizadas; compras em pullback recebem bônus.")
+    linhas.append(f"   📊 Filtro fundamental ativo: ROE ≥ {ROE_MINIMO:.0%}, Dívida/EBITDA ≤ {DIVIDA_EBITDA_MAX:.1f}x, FCF positivo, P/L ≤ {P_L_MAXIMO:.0f}x.")
+    linhas.append("")
+    linhas.append("---")
+    linhas.append(f"   📅 Gerado em {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
+    linhas.append(f"   🔧 Log detalhado: {ARQUIVO_LOG}")
+    return "\n".join(linhas)
+
+# ==================== FLUXO PRINCIPAL (EXECUÇÃO COMPLETA) ====================
+if __name__ == "__main__":
+    logger.inicio("Verificação de Conectividade")
+    if not verificar_conectividade():
+        logger.error("Sem conectividade com a internet!")
+        raise SystemExit("Sem conexão com a internet")
+    logger.fim("Verificação de Conectividade")
+
+    logger.inicio("Coleta de Tickers")
+    if MODO_TESTE:
+        tickers_b3 = TESTE_TICKERS.copy()
+        logger.log(f"⚠️ MODO TESTE: {len(tickers_b3)} tickers")
+    else:
+        tickers_b3 = obter_tickers_b3()
+        frac_remover = set()
+        tickers_set = set(tickers_b3)
+        for t in tickers_b3:
+            if t.endswith('F') and len(t) > 1:
+                base = t[:-1]
+                if base in tickers_set:
+                    frac_remover.add(t)
+        tickers_b3 = [t for t in tickers_b3 if t not in frac_remover]
+        logger.log(f"🔹 Tickers após limpeza: {len(tickers_b3)}")
+    tickers_sa = [t + ".SA" for t in tickers_b3]
+    logger.fim("Coleta de Tickers", {'total': len(tickers_b3)})
+
+    logger.inicio("Download Paralelizado (Preços + Fundamentos)")
+    cache_fund = carregar_cache_fundamentos()
+    data_d = {}
+    fund_data = {}
+    if BRAPI_TOKEN:
+        data_d = baixar_dados_brapi_otimizado(tickers_sa, periodo_anos=5, interval='1d')
+        tickers_para_baixar = [t for t in tickers_sa if t not in cache_fund]
+        if tickers_para_baixar:
+            logger.log(f"Baixando fundamentos para {len(tickers_para_baixar)} tickers...")
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                futures = {executor.submit(baixar_fundamentos_yfinance, t): t for t in tickers_para_baixar}
+                for future in as_completed(futures):
+                    t = futures[future]
+                    try:
+                        fund = future.result()
+                        if fund:
+                            cache_fund[t] = fund
+                    except Exception as e:
+                        _log_exc(f'Fundamento {t}', e)
+            salvar_cache_fundamentos(cache_fund)
+        fund_data = cache_fund
+    else:
+        data_d, fund_data_temp = baixar_dados_paralelo(tickers_sa, periodo='5y', max_workers=10)
+        fund_data = fund_data_temp
+        for t, f in fund_data_temp.items():
+            if t not in cache_fund or cache_fund[t] is None:
+                cache_fund[t] = f
+        salvar_cache_fundamentos(cache_fund)
+    logger.fim("Download Paralelizado", {'precos': len(data_d), 'fundamentos': len(fund_data)})
+
+    if len(data_d) == 0:
+        logger.error("Nenhum dado obtido")
+        raise SystemExit("Sem dados para análise")
+
+    logger.inicio("Filtro de Liquidez")
+    tickers_liquidos = []
+    for t in tickers_sa:
+        if t in TICKERS_BLOQUEADOS:
+            continue
+        df = data_d.get(t)
+        if df is None or df.empty:
+            continue
+        vm = df['Volume'].tail(21).mean()
+        pc = df['Close'].iloc[-1]
+        if pd.notna(vm) and pd.notna(pc) and vm >= VOLUME_MINIMO_ACAO and (vm * pc) >= VOLUME_FINANCEIRO_MINIMO:
+            tickers_liquidos.append(t)
+    if len(tickers_liquidos) < 10:
+        tickers_liquidos = [t+".SA" for t in FALLBACK_TICKERS[:20] if t+".SA" in data_d]
+    logger.fim("Filtro de Liquidez", {'liquidos': len(tickers_liquidos)})
+
+    logger.inicio("Score Setorial")
+    macro = obter_indicadores_macro()
+    score_setorial_dict = {}
+    for t in tickers_liquidos:
+        setor = classificar_setor(t)
+        score_setorial_dict[t] = calcular_score_setorial(setor, macro)
+    logger.fim("Score Setorial", {'macro': macro})
+
+    def resample_tf(df, freq, min_dias=4):
+        if df is None or df.empty:
+            return None
+        agg = {'Open':'first','High':'max','Low':'min','Close':'last','Volume':'sum'}
+        dfr = df.resample(freq, closed='right', label='right').agg(agg).dropna()
+        return dfr if len(dfr) >= min_dias else None
+
+    data_diario = {t: data_d[t].copy() for t in tickers_liquidos if t in data_d}
+    data_semanal = {t: resample_tf(data_d[t], 'W-FRI') for t in tickers_liquidos if t in data_d}
+    data_mensal = {t: resample_tf(data_d[t], 'ME') for t in tickers_liquidos if t in data_d}
+    data_semanal = {k:v for k,v in data_semanal.items() if v is not None}
+    data_mensal = {k:v for k,v in data_mensal.items() if v is not None}
+
+    logger.inicio("Scanner Wyckoff")
+    sinais_wyckoff = scanner_wyckoff(data_diario, tickers_liquidos, min_perna=20, max_perna=40)
+    logger.fim("Scanner Wyckoff", {'sinais': len(sinais_wyckoff)})
+
+    tendencia_superior = {}
+    if ANALISAR_SEMANAL and data_semanal:
+        for t, dfw in data_semanal.items():
+            if len(dfw) >= 30:
+                mm20w = dfw['Close'].rolling(20).mean().iloc[-1]
+                mm50w = dfw['Close'].rolling(50).mean().iloc[-1]
+                if mm20w > mm50w:
+                    tendencia_superior[t] = 'ALTA'
+                elif mm20w < mm50w:
+                    tendencia_superior[t] = 'BAIXA'
+                else:
+                    tendencia_superior[t] = 'LATERAL'
+
+    todas_ops, todos_status = [], []
+    if ANALISAR_DIARIO:
+        ops_d, stat_d, _ = analisar_timeframe_v16(
+            data_diario, "Diário", tickers_liquidos, tendencia_superior,
+            fund_data_dict=fund_data, score_setorial_dict=score_setorial_dict
+        )
+        todas_ops.extend(ops_d); todos_status.extend(stat_d)
+    if ANALISAR_SEMANAL:
+        ops_s, stat_s, _ = analisar_timeframe_v16(
+            data_semanal, "Semanal", tickers_liquidos, None,
+            fund_data_dict=fund_data, score_setorial_dict=score_setorial_dict
+        )
+        todas_ops.extend(ops_s); todos_status.extend(stat_s)
+    if ANALISAR_MENSAL:
+        ops_m, stat_m, _ = analisar_timeframe_v16(
+            data_mensal, "Mensal", tickers_liquidos, None,
+            fund_data_dict=fund_data, score_setorial_dict=score_setorial_dict
+        )
+        todas_ops.extend(ops_m); todos_status.extend(stat_m)
+
+    todas_oportunidades = sorted(todas_ops, key=lambda x: x['Score'], reverse=True)[:MAX_SETUPS_POR_DIA]
+    logger.log(f"🎯 Total oportunidades finais: {len(todas_oportunidades)}", "RESULTADO")
+
+    win_rate, total_trades, acertos, hist_trades = atualizar_historico_oportunidades(
+        todas_oportunidades, data_diario
+    )
+    logger.log(f"📊 Histórico: {total_trades} encerrados, {acertos} acertos ({win_rate}%)")
+
+    relatorio = gerar_relatorio_detalhado(
+        todas_oportunidades, todos_status, data_diario, nome_tf="Diário",
+        sinais_wyckoff=sinais_wyckoff,
+        win_rate=win_rate, total_trades=total_trades, acertos=acertos,
+        fund_data=fund_data, macro=macro
+    )
+    with open('relatorio_gebra_v16_3.txt', 'w', encoding='utf-8') as f:
+        f.write(relatorio)
+
+    def enviar_email(assunto, corpo):
+        if not EMAIL_REMETENTE or not SENHA_APP:
+            logger.log("E‑mail não configurado – relatório salvo localmente")
+            return
+        try:
+            msg = MIMEMultipart()
+            msg['From'] = EMAIL_REMETENTE
+            msg['To'] = EMAIL_REMETENTE
+            msg['Subject'] = assunto
+            msg.attach(MIMEText(corpo, 'plain'))
+            with smtplib.SMTP_SSL('smtp.gmail.com', 465) as srv:
+                srv.login(EMAIL_REMETENTE, SENHA_APP)
+                srv.send_message(msg)
+            logger.log("📧 E‑mail enviado com relatório detalhado")
+        except Exception as e:
+            _log_exc('Email', e)
+
+    enviar_email(
+        f"📈 GEBRA v16.3 - {len(todas_oportunidades)} ops - {datetime.now().strftime('%d/%m %H:%M')}",
+        relatorio
+    )
+
+    def mensagem_telegram(ops, wyckoff=None):
+        if not ops and not wyckoff:
+            return "📊 GEBRA v16.3\nNenhuma oportunidade.\nVerifique o relatório completo no e‑mail."
+        msg = f"🚀 GEBRA v16.3 - {datetime.now().strftime('%d/%m %H:%M')}\n\n"
+        if ops:
+            msg += "📈 OPORTUNIDADES GEBRA:\n"
+            for i, op in enumerate(ops[:5], 1):
+                msg += f"{i}. <b>[{op['Timeframe']}] {op['Ticker']}</b> | {op['Setup']} | {op['Direcao']}\n"
+                msg += f"   Entrada: R$ {op['Entrada']:.2f} | Stop: R$ {op['Stop Loss']:.2f} | Alvo: R$ {op['Alvo']:.2f} | Payoff: {op['Payoff']:.2f}\n"
+                msg += f"   Score: {op['Score']} | Setor: {op.get('Score_Setorial',0)}\n\n"
+        if wyckoff:
+            msg += "🦅 WYCKOFF:\n"
+            for i, s in enumerate(wyckoff[:5], 1):
+                msg += f"{i}. <b>{s['Ticker']}</b> | {s['Direcao']}\n"
+                msg += f"   Entrada: R$ {s['entrada']:.2f} | Stop: R$ {s['stop']:.2f} | Alvo: R$ {s['alvo']:.2f} | Perna: {s['ganho_percentual']:.1f}%\n\n"
+        return msg
+
+    enviar_telegram(mensagem_telegram(todas_oportunidades, sinais_wyckoff))
+
+    try:
+        aprovados = [s for s in todos_status if 'APROVADO' in s.get('Status', '')]
+        recusados = [s for s in todos_status if 'Recusado' in s.get('Status', '')]
+        motivos_recusa = Counter([s.get('Motivo', '') for s in recusados])
+        log_json = {
+            'timestamp': datetime.now().isoformat(),
+            'versao': 'v16.3',
+            'status_final': 'concluido',
+            'metricas': {
+                'total_analisados': len(todos_status),
+                'aprovados': len(aprovados),
+                'recusados': len(recusados),
+                'oportunidades_finais': len(todas_oportunidades)
+            },
+            'nhnl': calcular_nh_nl(data_diario),
+            'percentual_acima_mm200': percentual_acima_media_200(data_diario),
+            'resumo_recusas': dict(motivos_recusa.most_common(10)),
+            'watchlist': [{'ticker': s['Ticker'], 'timeframe': s.get('Timeframe', ''), 'motivo': s.get('Motivo', '')}
+                          for s in recusados if 'setup forte' in s.get('Motivo', '')][:15],
+            'oportunidades': todas_oportunidades,
+            'wyckoff': sinais_wyckoff
+        }
+        with open(ARQUIVO_LOG, 'w', encoding='utf-8') as f:
+            json.dump(log_json, f, indent=2, default=str)
+        logger.log("📄 Log JSON detalhado salvo")
+    except Exception as e:
+        _log_exc('log_json', e)
+
+    gc.collect()
+    logger.resumo()
+    print("\n✅ Análise concluída. Relatório: relatorio_gebra_v16_3.txt")
+    print(f"   Oportunidades GEBRA: {len(todas_oportunidades)}")
+    if sinais_wyckoff:
+        print(f"   Sinais Wyckoff: {len(sinais_wyckoff)}")
