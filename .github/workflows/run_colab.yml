@@ -28,7 +28,7 @@ jobs:
         env:
           TRADING_EMAIL: ${{ secrets.TRADING_EMAIL }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
-          BRAPI_API_TOKEN: ${{ secrets.BRAPI_API_TOKEN }}
+          BRAPI_API_TOKEN: ''
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
