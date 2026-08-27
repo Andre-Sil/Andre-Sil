@@ -2364,8 +2364,12 @@ if __name__ == "__main__":
         df = data_d.get(t)
         if df is None or df.empty:
             continue
-        vm = df['Volume'].tail(21).mean()
-        pc = df['Close'].iloc[-1]
+        # Garantir que vm e pc sejam escalares
+        vm_series = df['Volume'].tail(21).mean()
+        pc_series = df['Close'].iloc[-1]
+        # Converter para float (se for Series, pega o primeiro valor)
+        vm = float(vm_series) if isinstance(vm_series, (pd.Series, pd.DataFrame)) else vm_series
+        pc = float(pc_series) if isinstance(pc_series, (pd.Series, pd.DataFrame)) else pc_series
         if pd.notna(vm) and pd.notna(pc) and vm >= VOLUME_MINIMO_ACAO and (vm * pc) >= VOLUME_FINANCEIRO_MINIMO:
             tickers_liquidos.append(t)
     if len(tickers_liquidos) < 10:
