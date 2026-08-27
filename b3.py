@@ -2308,30 +2308,48 @@ if __name__ == "__main__":
     cache_fund = carregar_cache_fundamentos()
     data_d = {}
     fund_data = {}
+
+    # Tenta BRAPI primeiro
     if BRAPI_TOKEN:
+        logger.log("📡 Tentando BRAPI...")
         data_d = baixar_dados_brapi_otimizado(tickers_sa, periodo_anos=5, interval='1d')
-        tickers_para_baixar = [t for t in tickers_sa if t not in cache_fund]
-        if tickers_para_baixar:
-            logger.log(f"Baixando fundamentos para {len(tickers_para_baixar)} tickers...")
-            with ThreadPoolExecutor(max_workers=8) as executor:
-                futures = {executor.submit(baixar_fundamentos_yfinance, t): t for t in tickers_para_baixar}
-                for future in as_completed(futures):
-                    t = futures[future]
-                    try:
-                        fund = future.result()
-                        if fund:
-                            cache_fund[t] = fund
-                    except Exception as e:
-                        _log_exc(f'Fundamento {t}', e)
+        
+        # Se a BRAPI retornar poucos dados (ex: < 10% dos tickers), usa yfinance como fallback
+        if len(data_d) < len(tickers_sa) * 0.1:
+            logger.warn(f"BRAPI retornou apenas {len(data_d)} tickers. Usando yfinance como fallback...")
+            data_d, fund_data_temp = baixar_dados_paralelo(tickers_sa, periodo='5y', max_workers=10)
+            fund_data = fund_data_temp
+            for t, f in fund_data_temp.items():
+                if t not in cache_fund or cache_fund[t] is None:
+                    cache_fund[t] = f
             salvar_cache_fundamentos(cache_fund)
-        fund_data = cache_fund
+        else:
+            # BRAPI funcionou: baixa fundamentos (yfinance) para os tickers que faltam
+            tickers_para_baixar = [t for t in tickers_sa if t not in cache_fund]
+            if tickers_para_baixar:
+                logger.log(f"Baixando fundamentos para {len(tickers_para_baixar)} tickers...")
+                with ThreadPoolExecutor(max_workers=8) as executor:
+                    futures = {executor.submit(baixar_fundamentos_yfinance, t): t for t in tickers_para_baixar}
+                    for future in as_completed(futures):
+                        t = futures[future]
+                        try:
+                            fund = future.result()
+                            if fund:
+                                cache_fund[t] = fund
+                        except Exception as e:
+                            _log_exc(f'Fundamento {t}', e)
+                salvar_cache_fundamentos(cache_fund)
+            fund_data = cache_fund
     else:
+        # Sem BRAPI_TOKEN, usa yfinance diretamente
+        logger.log("BRAPI_TOKEN não configurado. Usando yfinance...")
         data_d, fund_data_temp = baixar_dados_paralelo(tickers_sa, periodo='5y', max_workers=10)
         fund_data = fund_data_temp
         for t, f in fund_data_temp.items():
             if t not in cache_fund or cache_fund[t] is None:
                 cache_fund[t] = f
         salvar_cache_fundamentos(cache_fund)
+
     logger.fim("Download Paralelizado", {'precos': len(data_d), 'fundamentos': len(fund_data)})
 
     if len(data_d) == 0:
